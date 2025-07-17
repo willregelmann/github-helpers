@@ -19,27 +19,25 @@ import os
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Find merged PRs with commits not in the target branch",
+        description="Find merged PRs whose commits are missing from their target branch (indicates history rewrites, resets, or lost commits)",
         prog="gh-orphaned-prs"
     )
     parser.add_argument(
         "target",
-        help="Organization or organization/repository"
-    )
-    parser.add_argument(
-        "branch",
         nargs="?",
-        help="Target branch name (if omitted, checks all PRs)"
+        help="Organization or organization/repository (defaults to current repository)"
     )
     parser.add_argument(
-        "--start-date",
-        type=str,
-        help="Start date for PR merge window (YYYY-MM-DD)"
+        "-R", "--repo",
+        help="Repository to check (owner/repo format)"
     )
     parser.add_argument(
-        "--end-date",
-        type=str,
-        help="End date for PR merge window (YYYY-MM-DD)"
+        "-B", "--base",
+        help="Only check PRs merged to this branch (if omitted, checks all merged PRs)"
+    )
+    parser.add_argument(
+        "-S", "--search",
+        help="Additional search terms (GitHub search syntax, e.g., 'merged:>2024-01-01', 'author:username')"
     )
     parser.add_argument(
         "--token",
@@ -51,6 +49,35 @@ def parse_arguments():
         help="Recreate orphaned PRs with the same source/target branches"
     )
     return parser.parse_args()
+
+
+def get_current_repository() -> Optional[str]:
+    """Get the current repository from git remote origin."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        if result.returncode == 0:
+            remote_url = result.stdout.strip()
+            # Parse GitHub URLs (both HTTPS and SSH formats)
+            if "github.com" in remote_url:
+                if remote_url.startswith("git@github.com:"):
+                    # SSH format: git@github.com:owner/repo.git
+                    repo_path = remote_url.replace("git@github.com:", "").replace(".git", "")
+                elif "github.com/" in remote_url:
+                    # HTTPS format: https://github.com/owner/repo.git
+                    repo_path = remote_url.split("github.com/")[1].replace(".git", "")
+                else:
+                    return None
+                
+                if "/" in repo_path:
+                    return repo_path
+        return None
+    except Exception:
+        return None
 
 
 def parse_target(target: str) -> Tuple[str, Optional[str]]:
@@ -175,8 +202,7 @@ def get_default_branch(org: str, repo: str, token: Optional[str]) -> Optional[st
 
 
 def fetch_merged_prs(owner: str, repo: str, token: Optional[str], 
-                    start_date: Optional[str], end_date: Optional[str],
-                    branch: Optional[str]) -> List[Dict]:
+                    search: Optional[str], branch: Optional[str]) -> List[Dict]:
     """Fetch merged PRs using GitHub Search API for better performance."""
     headers = {"Accept": "application/vnd.github.v3+json"}
     if token:
@@ -184,12 +210,10 @@ def fetch_merged_prs(owner: str, repo: str, token: Optional[str],
     
     # Build search query - much faster than paginating through all PRs
     query_parts = [f"repo:{owner}/{repo}", "is:pr", "is:merged"]
-    if start_date:
-        query_parts.append(f"merged:>={start_date}")
-    if end_date:
-        query_parts.append(f"merged:<={end_date}")
     if branch:
         query_parts.append(f"base:{branch}")
+    if search:
+        query_parts.append(search)
     
     query = " ".join(query_parts)
     
@@ -287,22 +311,23 @@ def is_commit_in_branch(owner: str, repo: str, commit_sha: str, branch: str, tok
         return False
 
 
-def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, branch: str, token: Optional[str]) -> Optional[Dict]:
+def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, token: Optional[str]) -> Optional[Dict]:
     """Check commits for a single PR and return orphaned PR data if any commits are missing."""
     pr_number = pr_data["number"]
     pr_title = pr_data["title"]
+    target_branch = pr_data.get("base", {}).get("ref", "unknown")
     
     try:
         commits = get_pr_commits(owner, repo, pr_number, token)
     except requests.exceptions.RequestException:
         return None
     
-    # Check commits concurrently
+    # Check commits concurrently against the PR's actual target branch
     missing_commits = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         # Submit all commit checks
         future_to_commit = {
-            executor.submit(is_commit_in_branch, owner, repo, commit_sha, branch, token): commit_sha
+            executor.submit(is_commit_in_branch, owner, repo, commit_sha, target_branch, token): commit_sha
             for commit_sha in commits
         }
         
@@ -324,26 +349,20 @@ def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, branch: st
             "url": pr_data["html_url"],
             "merged_at": pr_data["merged_at"],
             "source_branch": pr_data.get("head", {}).get("ref", "unknown"),
-            "target_branch": pr_data.get("base", {}).get("ref", "unknown"),
-            "repository": f"{owner}/{repo}"
+            "target_branch": target_branch,
+            "repository": f"{owner}/{repo}",
+            "user": pr_data.get("user", {}),
+            "missing_commits": missing_commits
         }
     
     return None
 
 
 def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str], 
-                                  start_date: Optional[str], end_date: Optional[str],
-                                  token: Optional[str]) -> List[Dict]:
+                                  search: Optional[str], token: Optional[str]) -> List[Dict]:
     """Check a single repository for orphaned PRs."""
-    # If no branch specified, use default branch
-    if branch is None:
-        branch = get_default_branch(owner, repo, token)
-        if branch is None:
-            print(f"  Could not determine default branch for {owner}/{repo}")
-            return []
-    
     try:
-        merged_prs = fetch_merged_prs(owner, repo, token, start_date, end_date, branch)
+        merged_prs = fetch_merged_prs(owner, repo, token, search, branch)
     except requests.exceptions.RequestException as e:
         print(f"  Error fetching PRs for {owner}/{repo}: {e}")
         return []
@@ -356,9 +375,9 @@ def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str],
     
     # Process PRs concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # Submit all PR checks
+        # Submit all PR checks - each PR will be checked against its own target branch
         future_to_pr = {
-            executor.submit(check_pr_commits_concurrent, owner, repo, pr, branch, token): pr
+            executor.submit(check_pr_commits_concurrent, owner, repo, pr, token): pr
             for pr in merged_prs
         }
         
@@ -374,11 +393,40 @@ def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str],
     return orphaned_prs
 
 
+def request_review_from_author(owner: str, repo: str, pr_url: str, author: str) -> str:
+    """Request a review from the original PR author using gh CLI."""
+    try:
+        # Extract PR number from URL
+        pr_number = pr_url.split('/')[-1]
+        
+        # Request review using gh CLI
+        cmd = [
+            "gh", "api", 
+            f"repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+            "--method", "POST",
+            "--field", f"reviewers[]={author}"
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            return f"success - requested review from {author}"
+        else:
+            error_msg = result.stderr.strip() or "Unknown error"
+            if "Review cannot be requested from pull request author" in error_msg:
+                return f"skipped - cannot request review from PR author"
+            return f"failed - {error_msg}"
+            
+    except Exception as e:
+        return f"failed - {str(e)}"
+
+
 def recreate_pr(owner: str, repo: str, pr_data: Dict, target_branch: str) -> Dict[str, str]:
     """Recreate a PR using gh CLI."""
     source_branch = pr_data["source_branch"]
     title = f"{pr_data['title']} (reopened)"
     pr_number = pr_data["number"]
+    original_author = pr_data.get("user", {}).get("login")
     
     try:
         # First check if the source branch exists
@@ -408,11 +456,18 @@ def recreate_pr(owner: str, repo: str, pr_data: Dict, target_branch: str) -> Dic
         if result.returncode == 0:
             # Extract PR URL from output
             pr_url = result.stdout.strip()
+            
+            # Request review from original author if available
+            review_status = None
+            if original_author:
+                review_status = request_review_from_author(owner, repo, pr_url, original_author)
+            
             return {
                 "status": "success",
                 "original_pr": pr_number,
                 "new_pr_url": pr_url,
-                "source_branch": source_branch
+                "source_branch": source_branch,
+                "review_requested": review_status
             }
         else:
             error_msg = result.stderr.strip() or "Unknown error"
@@ -440,65 +495,86 @@ def main():
     args = parse_arguments()
     token = get_github_token(args.token)
     
-    org, repo = parse_target(args.target)
+    # Determine target repository
+    if args.repo:
+        # Use --repo/-R flag
+        target = args.repo
+    elif args.target:
+        # Use positional target argument
+        target = args.target
+    else:
+        # Use current repository
+        current_repo = get_current_repository()
+        if not current_repo:
+            print("Error: Could not detect current repository and no target specified.", file=sys.stderr)
+            print("Use --repo owner/repo or run from a git repository with GitHub remote.", file=sys.stderr)
+            sys.exit(1)
+        target = current_repo
+    
+    org, repo = parse_target(target)
     
     if repo:
         # Single repository
         repos = [repo]
-        print(f"Checking repository {org}/{repo}...")
     else:
         # All repositories in organization
-        print(f"Fetching repositories for organization {org}...")
         try:
             repos = get_organization_repos(org, token)
         except requests.exceptions.RequestException as e:
             print(f"Error fetching repositories: {e}", file=sys.stderr)
             sys.exit(1)
-        print(f"Found {len(repos)} repositories")
-    
-    if args.start_date or args.end_date:
-        print(f"Date range: {args.start_date or 'any'} to {args.end_date or 'any'}")
     
     all_orphaned_prs = []
     
     for repo_name in repos:
-        if len(repos) > 1:
-            print(f"\nChecking {org}/{repo_name}...")
-        
         orphaned_prs = check_repository_orphaned_prs(
-            org, repo_name, args.branch, args.start_date, args.end_date, token
+            org, repo_name, args.base, args.search, token
         )
         
         if orphaned_prs:
             all_orphaned_prs.extend(orphaned_prs)
-            if len(repos) > 1:
-                print(f"  Found {len(orphaned_prs)} orphaned PRs")
     
     # Display results
-    print(f"\n{'='*60}")
-    print(f"RESULTS: Found {len(all_orphaned_prs)} orphaned PRs")
-    print(f"{'='*60}\n")
-    
     if all_orphaned_prs:
+        print(f"\nShowing {len(all_orphaned_prs)} orphaned pull requests")
+        print()
+        
         # Sort by merge date (newest first)
         all_orphaned_prs.sort(key=lambda x: x['merged_at'], reverse=True)
         
+        # Calculate column widths
+        id_width = max(len(f"#{pr['number']}") for pr in all_orphaned_prs)
+        id_width = max(id_width, 2)  # minimum width for "ID"
+        
+        title_width = max(len(pr['title']) for pr in all_orphaned_prs)
+        title_width = max(title_width, 5)  # minimum width for "TITLE"
+        title_width = min(title_width, 50)  # cap at 50 chars
+        
+        branch_width = max(len(pr['source_branch']) for pr in all_orphaned_prs)
+        branch_width = max(branch_width, 6)  # minimum width for "BRANCH"
+        branch_width = min(branch_width, 25)  # cap at 25 chars
+        
+        target_width = max(len(pr['target_branch']) for pr in all_orphaned_prs)
+        target_width = max(target_width, 6)  # minimum width for "TARGET"
+        target_width = min(target_width, 20)  # cap at 20 chars
+        
+        # Print header
+        print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+        
+        # Print PRs
         for pr in all_orphaned_prs:
+            pr_id = f"#{pr['number']}"
+            title = pr['title'][:title_width] if len(pr['title']) > title_width else pr['title']
+            branch = pr['source_branch'][:branch_width] if len(pr['source_branch']) > branch_width else pr['source_branch']
+            target = pr['target_branch'][:target_width] if len(pr['target_branch']) > target_width else pr['target_branch']
             merged_date = pr['merged_at'].split('T')[0]  # Just the date part
-            print(f"PR #{pr['number']}: {pr['title']}")
-            print(f"  Repository: {pr['repository']}")
-            print(f"  Source branch: {pr['source_branch']}")
-            print(f"  Target branch: {pr['target_branch']}")
-            print(f"  Merged: {merged_date}")
-            print(f"  URL: {pr['url']}")
-            print()
+            
+            print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+        
+        print()  # Empty line after table
         
         # Handle --reopen option
         if args.reopen:
-            print(f"\n{'='*60}")
-            print("REOPENING ORPHANED PRs")
-            print(f"{'='*60}\n")
-            
             successful_reopens = []
             failed_reopens = []
             
@@ -506,35 +582,30 @@ def main():
                 repo_parts = pr['repository'].split('/')
                 owner_name, repo_name = repo_parts[0], repo_parts[1]
                 
-                print(f"Reopening PR #{pr['number']} in {pr['repository']} from branch '{pr['source_branch']}'...")
                 result = recreate_pr(owner_name, repo_name, pr, pr['target_branch'])
                 
                 if result["status"] == "success":
                     successful_reopens.append(result)
-                    print(f"  ✓ Success: {result['new_pr_url']}")
+                    message = f"✓ Reopened PR #{result['original_pr']} as {result['new_pr_url']}"
+                    if result.get("review_requested"):
+                        if "success" in result["review_requested"]:
+                            message += f" (review requested)"
+                        elif "skipped" in result["review_requested"]:
+                            pass  # Don't show skipped review requests
+                        else:
+                            message += f" (review request failed)"
+                    print(message)
                 else:
                     failed_reopens.append(result)
-                    print(f"  ✗ Failed: {result['error']}")
+                    print(f"✗ Failed to reopen PR #{result['original_pr']}: {result['error']}")
             
             # Summary
-            print(f"\n{'='*60}")
-            print("REOPEN SUMMARY")
-            print(f"{'='*60}")
-            print(f"Successfully reopened: {len(successful_reopens)}")
-            print(f"Failed to reopen: {len(failed_reopens)}")
-            
-            if successful_reopens:
-                print("\nSuccessfully reopened PRs:")
-                for result in successful_reopens:
-                    print(f"  - PR #{result['original_pr']} → {result['new_pr_url']}")
-            
-            if failed_reopens:
-                print("\nFailed to reopen PRs:")
-                for result in failed_reopens:
-                    print(f"  - PR #{result['original_pr']} ({result['source_branch']}): {result['error']}")
+            if successful_reopens or failed_reopens:
+                print(f"\nReopened {len(successful_reopens)} of {len(all_orphaned_prs)} PRs")
+                if failed_reopens:
+                    print(f"Failed to reopen {len(failed_reopens)} PRs")
     else:
-        branch_desc = args.branch if args.branch else "default branches"
-        print(f"All merged PR commits are present in the {branch_desc}.")
+        print("\nNo orphaned pull requests found")
 
 
 if __name__ == "__main__":

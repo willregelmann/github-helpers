@@ -29,36 +29,42 @@ gh-check-ahead myorg/myrepo staging..production
 ```
 
 ### `gh-orphaned-prs`
-Find merged PRs that contain commits not present in the target branch.
+Find merged PRs whose commits are missing from their target branch (indicates history rewrites, resets, or lost commits).
 
 **Usage:**
 ```bash
-gh-orphaned-prs <target> [branch] [options]
+gh-orphaned-prs [target] [options]
 ```
 
 **Arguments:**
-- `target` - Organization (e.g., `myorg`) or specific repository (`myorg/myrepo`)
-- `branch` - Target branch name (optional, defaults to default branch)
+- `target` - Organization (e.g., `myorg`) or specific repository (`myorg/myrepo`) - defaults to current repository
 
 **Options:**
-- `--start-date YYYY-MM-DD` - Start date for PR merge window
-- `--end-date YYYY-MM-DD` - End date for PR merge window
+- `-R, --repo REPO` - Repository to check (owner/repo format)
+- `-B, --base BASE` - Only check PRs merged to this branch (if omitted, checks all merged PRs)
+- `-S, --search SEARCH` - Additional search terms (GitHub search syntax)
 - `--reopen` - Recreate orphaned PRs with the same source/target branches
 - `--token TOKEN` - GitHub personal access token
 
 **Examples:**
 ```bash
-# Find orphaned PRs in all repos in an organization
-gh-orphaned-prs myorg
+# Find all orphaned PRs in current repository
+gh-orphaned-prs
 
-# Find orphaned PRs in a specific repo targeting main branch
-gh-orphaned-prs myorg/myrepo main
+# Find orphaned PRs in a specific repository
+gh-orphaned-prs -R myorg/myrepo
 
-# Find orphaned PRs merged in the last month
-gh-orphaned-prs myorg --start-date 2023-12-01 --end-date 2023-12-31
+# Find orphaned PRs merged to main branch only
+gh-orphaned-prs --base main
 
-# Find and automatically reopen orphaned PRs
-gh-orphaned-prs myorg/myrepo main --reopen
+# Find orphaned PRs merged after a specific date
+gh-orphaned-prs -S "merged:>2024-01-01"
+
+# Find orphaned PRs from a specific author
+gh-orphaned-prs -S "author:username"
+
+# Find and automatically reopen orphaned PRs, requesting review from original authors
+gh-orphaned-prs --reopen
 ```
 
 ## Installation
@@ -99,11 +105,41 @@ The tools support multiple authentication methods:
 
 ### `gh-orphaned-prs`
 - ✅ Fast PR discovery using GitHub Search API
-- ✅ Concurrent commit checking for performance
-- ✅ Date range filtering for targeted analysis
+- ✅ Concurrent commit checking for performance  
+- ✅ GitHub CLI-style interface with `-R` and `-B` flags
+- ✅ Current directory repository auto-detection
+- ✅ Flexible search filtering with GitHub search syntax (`-S`)
+- ✅ Clean tabular output matching `gh pr list` format
 - ✅ Automatic PR recreation with `--reopen` flag
-- ✅ Detailed output with merge dates and branch info
+- ✅ Review requests to original authors on reopened PRs
+- ✅ Proper orphan detection (checks commits against actual target branches)
 - ✅ Organization-wide or single repository analysis
+
+## Output Examples
+
+### `gh-orphaned-prs` Output
+```bash
+$ gh-orphaned-prs
+Showing 3 orphaned pull requests
+
+ID   TITLE                         BRANCH                TARGET        MERGED
+#16  Test PR for dev branch reset  reset-test            dev           2025-07-17
+#12  Test hotfix 2                 hotfix/test-hotfix-2  release/24.1  2024-12-12
+#8   Test hotfix commit 3          test-hotfix-3         release/24.7  2024-12-12
+```
+
+### `gh-orphaned-prs --reopen` Output
+```bash
+$ gh-orphaned-prs --reopen
+Showing 1 orphaned pull requests
+
+ID   TITLE                         BRANCH      TARGET  MERGED
+#16  Test PR for dev branch reset  reset-test  dev     2025-07-17
+
+✓ Reopened PR #16 as https://github.com/owner/repo/pull/20 (review requested)
+
+Reopened 1 of 1 PRs
+```
 
 ## Use Cases
 
@@ -113,9 +149,11 @@ The tools support multiple authentication methods:
 - Monitor branch synchronization across organizations
 
 ### PR Analysis
-- Detect merged PRs whose commits didn't make it to target branches
-- Identify potential git workflow issues
-- Clean up orphaned work by reopening PRs
+- Detect merged PRs whose commits are missing from their target branches
+- Identify history rewrites, force pushes, and branch resets
+- Find lost commits from deleted/recreated release branches
+- Recover orphaned work by reopening PRs with review requests
+- Validate that merged PRs are properly integrated into their target branches
 
 ### DevOps & CI/CD
 - Validate deployment readiness across repositories

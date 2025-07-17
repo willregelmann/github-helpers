@@ -71,6 +71,9 @@ gh-orphaned-prs -S "merged:>2024-01-01"
 # Find orphaned PRs from a specific author
 gh-orphaned-prs -S "author:username"
 
+# Find orphaned PRs across all repos in an organization
+gh-orphaned-prs -R "myorg/*"
+
 # Find and automatically reopen orphaned PRs, requesting review from original authors
 gh-orphaned-prs --reopen
 ```
@@ -118,6 +121,7 @@ The tools support multiple authentication methods:
 - ✅ Concurrent commit checking for performance  
 - ✅ GitHub CLI-style interface with `-R` and `-B` flags
 - ✅ Current directory repository auto-detection
+- ✅ Wildcard organization support with `-R "owner/*"`
 - ✅ Flexible search filtering with GitHub search syntax (`-S`)
 - ✅ Clean tabular output matching `gh pr list` format
 - ✅ Automatic PR recreation with `--reopen` flag

@@ -144,6 +144,6 @@ dmypy.json
 ehthumbs.db
 Thumbs.db
 
-# Project specific
-check_ahead_branches.py
-find_orphaned_prs.py
+# Temporary directories
+temp-*/
+tmp/

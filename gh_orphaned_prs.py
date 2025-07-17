@@ -7,13 +7,20 @@ import argparse
 import subprocess
 import json
 import sys
-from datetime import datetime
 from typing import List, Dict, Optional, Tuple
-import requests
-from urllib.parse import urlparse
 import concurrent.futures
-import time
 import os
+
+from github_utils import (
+    get_current_repository,
+    parse_target,
+    parse_repo_pattern,
+    get_organization_repos,
+    get_default_branch,
+    fetch_merged_prs,
+    get_pr_commits,
+    is_commit_in_branch
+)
 
 
 def parse_arguments():
@@ -29,7 +36,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "-R", "--repo",
-        help="Repository to check (owner/repo format)"
+        help="Repository to check (owner/repo format, or owner/* for all repos in org)"
     )
     parser.add_argument(
         "-B", "--base",
@@ -40,10 +47,6 @@ def parse_arguments():
         help="Additional search terms (GitHub search syntax, e.g., 'merged:>2024-01-01', 'author:username')"
     )
     parser.add_argument(
-        "--token",
-        help="GitHub personal access token (or set GITHUB_TOKEN env var)"
-    )
-    parser.add_argument(
         "--reopen",
         action="store_true",
         help="Recreate orphaned PRs with the same source/target branches"
@@ -51,275 +54,15 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def get_current_repository() -> Optional[str]:
-    """Get the current repository from git remote origin."""
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            cwd=os.getcwd()
-        )
-        if result.returncode == 0:
-            remote_url = result.stdout.strip()
-            # Parse GitHub URLs (both HTTPS and SSH formats)
-            if "github.com" in remote_url:
-                if remote_url.startswith("git@github.com:"):
-                    # SSH format: git@github.com:owner/repo.git
-                    repo_path = remote_url.replace("git@github.com:", "").replace(".git", "")
-                elif "github.com/" in remote_url:
-                    # HTTPS format: https://github.com/owner/repo.git
-                    repo_path = remote_url.split("github.com/")[1].replace(".git", "")
-                else:
-                    return None
-                
-                if "/" in repo_path:
-                    return repo_path
-        return None
-    except Exception:
-        return None
-
-
-def parse_target(target: str) -> Tuple[str, Optional[str]]:
-    """Parse target to extract organization and optional repository."""
-    if "/" in target:
-        parts = target.split("/", 1)
-        return parts[0], parts[1]
-    return target, None
-
-
-def get_github_token(token_arg: Optional[str]) -> Optional[str]:
-    """Get GitHub token from argument, environment, or gh CLI."""
-    # First try the provided argument
-    if token_arg:
-        return token_arg
-    
-    # Then try environment variable
-    env_token = os.environ.get("GITHUB_TOKEN")
-    if env_token:
-        return env_token
-    
-    # Finally, try to get token from gh CLI
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "token"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:
-        pass
-    
-    return None
-
-
-def get_organization_repos(org: str, token: Optional[str]) -> List[str]:
-    """Get all repositories for an organization that the authenticated user can access."""
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"token {token}"
-    
-    repos = []
-    
-    if token:
-        # Use the authenticated user repos endpoint to get all repos with org membership
-        page = 1
-        per_page = 100
-        
-        while True:
-            url = "https://api.github.com/user/repos"
-            params = {
-                "per_page": per_page,
-                "page": page,
-                "affiliation": "organization_member,collaborator,owner",
-                "sort": "updated",
-                "direction": "desc"
-            }
-            
-            response = requests.get(url, headers=headers, params=params)
-            
-            if response.status_code != 200:
-                break
-            
-            page_repos = response.json()
-            if not page_repos:
-                break
-            
-            # Filter repos that belong to the specified organization
-            org_repos = [repo for repo in page_repos 
-                        if repo.get("owner", {}).get("login") == org]
-            repos.extend([repo["name"] for repo in org_repos])
-            
-            page += 1
-            
-            # Safety limit
-            if page > 100:
-                break
-    else:
-        # Fall back to public org repos if no token
-        print("No token provided, falling back to public org repos...")
-        page = 1
-        per_page = 100
-        
-        while True:
-            url = f"https://api.github.com/orgs/{org}/repos"
-            params = {
-                "per_page": per_page,
-                "page": page,
-                "type": "public"
-            }
-            
-            response = requests.get(url, headers=headers, params=params)
-            if response.status_code != 200:
-                break
-            
-            page_repos = response.json()
-            if not page_repos:
-                break
-            
-            repos.extend([repo["name"] for repo in page_repos])
-            page += 1
-            
-            if page > 100:
-                break
-    
-    return repos
-
-
-def get_default_branch(org: str, repo: str, token: Optional[str]) -> Optional[str]:
-    """Get the default branch for a repository."""
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"token {token}"
-    
-    url = f"https://api.github.com/repos/{org}/{repo}"
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        return response.json().get("default_branch")
-    return None
-
-
-def fetch_merged_prs(owner: str, repo: str, token: Optional[str], 
-                    search: Optional[str], branch: Optional[str]) -> List[Dict]:
-    """Fetch merged PRs using GitHub Search API for better performance."""
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"token {token}"
-    
-    # Build search query - much faster than paginating through all PRs
-    query_parts = [f"repo:{owner}/{repo}", "is:pr", "is:merged"]
-    if branch:
-        query_parts.append(f"base:{branch}")
-    if search:
-        query_parts.append(search)
-    
-    query = " ".join(query_parts)
-    
-    merged_prs = []
-    page = 1
-    per_page = 100
-    
-    while True:
-        url = "https://api.github.com/search/issues"
-        params = {
-            "q": query,
-            "sort": "updated",
-            "order": "desc",
-            "per_page": per_page,
-            "page": page
-        }
-        
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        
-        data = response.json()
-        items = data.get("items", [])
-        
-        if not items:
-            break
-        
-        # Convert search results to PR format with concurrent requests
-        pr_urls = [item["pull_request"]["url"] for item in items]
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_url = {
-                executor.submit(requests.get, url, headers=headers): url 
-                for url in pr_urls
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_url):
-                try:
-                    response = future.result()
-                    if response.status_code == 200:
-                        merged_prs.append(response.json())
-                except Exception:
-                    continue
-        
-        page += 1
-        
-        # GitHub search API has a 1000 result limit (10 pages of 100)
-        if page > 10 or len(items) < per_page:
-            break
-    
-    return merged_prs
-
-
-def get_pr_commits(owner: str, repo: str, pr_number: int, token: Optional[str]) -> List[str]:
-    """Get all commit SHAs from a PR."""
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"token {token}"
-    
-    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/commits"
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    
-    commits = response.json()
-    return [commit["sha"] for commit in commits]
-
-
-def is_commit_in_branch(owner: str, repo: str, commit_sha: str, branch: str, token: Optional[str]) -> bool:
-    """Check if a commit exists in the specified branch using GitHub API."""
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        headers["Authorization"] = f"token {token}"
-    
-    try:
-        # Use the compare API to check if the commit is reachable from the branch
-        url = f"https://api.github.com/repos/{owner}/{repo}/compare/{commit_sha}...{branch}"
-        response = requests.get(url, headers=headers)
-        
-        # Handle rate limiting
-        if response.status_code == 429:
-            reset_time = int(response.headers.get('X-RateLimit-Reset', time.time() + 60))
-            sleep_time = max(1, reset_time - int(time.time()))
-            time.sleep(sleep_time)
-            response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            comparison = response.json()
-            ahead_by = comparison.get("ahead_by", 1)
-            status = comparison.get("status", "unknown")
-            return status in ["identical", "ahead"]
-        elif response.status_code == 404:
-            return False
-        else:
-            return False
-    except requests.exceptions.RequestException:
-        return False
-
-
-def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, token: Optional[str]) -> Optional[Dict]:
+def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict) -> Optional[Dict]:
     """Check commits for a single PR and return orphaned PR data if any commits are missing."""
     pr_number = pr_data["number"]
     pr_title = pr_data["title"]
     target_branch = pr_data.get("base", {}).get("ref", "unknown")
     
     try:
-        commits = get_pr_commits(owner, repo, pr_number, token)
-    except requests.exceptions.RequestException:
+        commits = get_pr_commits(owner, repo, pr_number)
+    except Exception:
         return None
     
     # Check commits concurrently against the PR's actual target branch
@@ -327,7 +70,7 @@ def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, token: Opt
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         # Submit all commit checks
         future_to_commit = {
-            executor.submit(is_commit_in_branch, owner, repo, commit_sha, target_branch, token): commit_sha
+            executor.submit(is_commit_in_branch, owner, repo, commit_sha, target_branch): commit_sha
             for commit_sha in commits
         }
         
@@ -359,11 +102,11 @@ def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, token: Opt
 
 
 def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str], 
-                                  search: Optional[str], token: Optional[str]) -> List[Dict]:
+                                  search: Optional[str]) -> List[Dict]:
     """Check a single repository for orphaned PRs."""
     try:
-        merged_prs = fetch_merged_prs(owner, repo, token, search, branch)
-    except requests.exceptions.RequestException as e:
+        merged_prs = fetch_merged_prs(owner, repo, search, branch)
+    except Exception as e:
         print(f"  Error fetching PRs for {owner}/{repo}: {e}")
         return []
     
@@ -377,7 +120,7 @@ def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str],
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         # Submit all PR checks - each PR will be checked against its own target branch
         future_to_pr = {
-            executor.submit(check_pr_commits_concurrent, owner, repo, pr, token): pr
+            executor.submit(check_pr_commits_concurrent, owner, repo, pr): pr
             for pr in merged_prs
         }
         
@@ -493,15 +236,24 @@ def recreate_pr(owner: str, repo: str, pr_data: Dict, target_branch: str) -> Dic
 
 def main():
     args = parse_arguments()
-    token = get_github_token(args.token)
+    # GitHub CLI handles authentication automatically
     
-    # Determine target repository
+    # Determine target repository/organization
     if args.repo:
         # Use --repo/-R flag
-        target = args.repo
+        target_pattern, is_wildcard = parse_repo_pattern(args.repo)
+        if is_wildcard:
+            # Organization wildcard (e.g., "commandlink/*")
+            org = target_pattern
+            repos = None  # Will fetch later
+        else:
+            # Specific repository (e.g., "owner/repo")
+            org, repo = parse_target(target_pattern)
+            repos = [repo] if repo else None
     elif args.target:
         # Use positional target argument
-        target = args.target
+        org, repo = parse_target(args.target)
+        repos = [repo] if repo else None
     else:
         # Use current repository
         current_repo = get_current_repository()
@@ -509,18 +261,15 @@ def main():
             print("Error: Could not detect current repository and no target specified.", file=sys.stderr)
             print("Use --repo owner/repo or run from a git repository with GitHub remote.", file=sys.stderr)
             sys.exit(1)
-        target = current_repo
-    
-    org, repo = parse_target(target)
-    
-    if repo:
-        # Single repository
+        org, repo = parse_target(current_repo)
         repos = [repo]
-    else:
-        # All repositories in organization
+    
+    # Fetch repositories if needed
+    if repos is None:
+        # Organization mode - fetch all repos
         try:
-            repos = get_organization_repos(org, token)
-        except requests.exceptions.RequestException as e:
+            repos = get_organization_repos(org)
+        except Exception as e:
             print(f"Error fetching repositories: {e}", file=sys.stderr)
             sys.exit(1)
     
@@ -528,7 +277,7 @@ def main():
     
     for repo_name in repos:
         orphaned_prs = check_repository_orphaned_prs(
-            org, repo_name, args.base, args.search, token
+            org, repo_name, args.base, args.search
         )
         
         if orphaned_prs:
@@ -541,6 +290,10 @@ def main():
         
         # Sort by merge date (newest first)
         all_orphaned_prs.sort(key=lambda x: x['merged_at'], reverse=True)
+        
+        # Check if we have multiple repositories
+        unique_repos = set(pr['repository'] for pr in all_orphaned_prs)
+        show_repo_column = len(unique_repos) > 1
         
         # Calculate column widths
         id_width = max(len(f"#{pr['number']}") for pr in all_orphaned_prs)
@@ -558,8 +311,18 @@ def main():
         target_width = max(target_width, 6)  # minimum width for "TARGET"
         target_width = min(target_width, 20)  # cap at 20 chars
         
+        repo_width = 0
+        if show_repo_column:
+            repo_names = [pr['repository'].split('/')[-1] for pr in all_orphaned_prs]  # Just repo name, not org/repo
+            repo_width = max(len(repo_name) for repo_name in repo_names)
+            repo_width = max(repo_width, 4)  # minimum width for "REPO"
+            repo_width = min(repo_width, 30)  # cap at 30 chars
+        
         # Print header
-        print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+        if show_repo_column:
+            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+        else:
+            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
         
         # Print PRs
         for pr in all_orphaned_prs:
@@ -569,7 +332,12 @@ def main():
             target = pr['target_branch'][:target_width] if len(pr['target_branch']) > target_width else pr['target_branch']
             merged_date = pr['merged_at'].split('T')[0]  # Just the date part
             
-            print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+            if show_repo_column:
+                repo_name = pr['repository'].split('/')[-1]  # Just repo name
+                repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
+                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {repo_display:<{repo_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+            else:
+                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
         
         print()  # Empty line after table
         

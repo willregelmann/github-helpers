@@ -6,9 +6,9 @@ setup(
     description="GitHub CLI helper tools for repository management",
     author="Will Regelmann",
     author_email="will@regelmann.net",
-    py_modules=["gh_check_ahead", "gh_orphaned_prs"],
+    py_modules=["gh_check_ahead", "gh_orphaned_prs", "github_utils"],
     install_requires=[
-        "requests",
+        # No external dependencies - uses GitHub CLI
     ],
     entry_points={
         'console_scripts': [

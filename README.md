@@ -9,23 +9,31 @@ Find repositories where a branch is ahead of another branch.
 
 **Usage:**
 ```bash
-gh-check-ahead <target> <branches>
+gh-check-ahead -H <head> [-B <base>] [target]
 ```
 
 **Arguments:**
-- `target` - Organization (e.g., `myorg`) or specific repository (`myorg/myrepo`)
-- `branches` - Branch comparison in format `from_branch[..to_branch]`
+- `target` - Organization (e.g., `myorg`) or specific repository (`myorg/myrepo`) - defaults to current repository
+
+**Options:**
+- `-H, --head HEAD` - Source branch to check (the branch that might be ahead) - **required**
+- `-B, --base BASE` - Target branch to compare against (defaults to repository's default branch)
+- `-R, --repo REPO` - Repository to check (owner/repo format, or owner/* for all repos in org)
+- `--token TOKEN` - GitHub personal access token
 
 **Examples:**
 ```bash
-# Check if 'develop' is ahead of 'main' in all repos in an organization
-gh-check-ahead myorg develop..main
+# Check if dev is ahead of main in current repository
+gh-check-ahead -H dev -B main
 
-# Check if 'feature' is ahead of default branch in a specific repo
-gh-check-ahead myorg/myrepo feature
+# Check if dev is ahead of default branch in specific repository
+gh-check-ahead -H dev -R owner/repo
 
-# Check if 'staging' is ahead of 'production' in a specific repo
-gh-check-ahead myorg/myrepo staging..production
+# Check if feature is ahead of develop across all repos in organization
+gh-check-ahead -H feature -B develop -R "myorg/*"
+
+# Check if main is ahead of release in current repository
+gh-check-ahead -H main -B release
 ```
 
 ### `gh-orphaned-prs`
@@ -97,11 +105,13 @@ The tools support multiple authentication methods:
 
 ### `gh-check-ahead`
 - ✅ Concurrent processing for fast organization-wide checks
-- ✅ Supports both organization and single repository targets
-- ✅ Flexible branch comparison syntax
+- ✅ GitHub CLI-style interface with `-H/--head` and `-B/--base` flags
+- ✅ Current directory repository auto-detection
+- ✅ Wildcard organization support with `-R "owner/*"` 
+- ✅ Clean tabular output with REPO, HEAD, BASE, AHEAD, BEHIND, STATUS columns
+- ✅ Smart default branch detection when base not specified
 - ✅ Rate limiting handling
-- ✅ Clear output with repository URLs
-- ✅ Automatic default branch detection
+- ✅ Supports single repositories, organizations, and current repo
 
 ### `gh-orphaned-prs`
 - ✅ Fast PR discovery using GitHub Search API
@@ -116,6 +126,19 @@ The tools support multiple authentication methods:
 - ✅ Organization-wide or single repository analysis
 
 ## Output Examples
+
+### `gh-check-ahead` Output
+```bash
+$ gh-check-ahead -H dev -B main -R "myorg/*"
+Showing 5 repositories where dev is ahead
+
+REPO              HEAD  BASE  AHEAD  BEHIND  STATUS
+analytics-python  dev   main  51     -       
+CommandSecurity   dev   main  304    -       
+Integrations      dev   main  17     6       diverged
+react-cmdlnk-gui  dev   main  122    -       
+terraform-jenkins dev   main  6      2       diverged
+```
 
 ### `gh-orphaned-prs` Output
 ```bash

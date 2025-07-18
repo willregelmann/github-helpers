@@ -78,6 +78,49 @@ gh-orphaned-prs -R "myorg/*"
 gh-orphaned-prs --reopen
 ```
 
+### `gh-prune-branches`
+Delete branches that have no commits ahead of the repository's default branch.
+
+**Usage:**
+```bash
+gh-prune-branches [options]
+```
+
+**Options:**
+- `-R, --repo REPO` - Repository to check (owner/repo format, or owner/* for all repos in org)
+- `--report` - Only report branches that would be deleted without actually deleting them
+- `--filter PATTERN` - Regex pattern to filter branch names (only branches matching the pattern will be considered)
+
+**Examples:**
+```bash
+# Show branches that can be pruned in current repository
+gh-prune-branches --report
+
+# Delete prunable branches in current repository
+gh-prune-branches
+
+# Report prunable branches in specific repository
+gh-prune-branches --report -R myorg/myrepo
+
+# Delete prunable branches across all repos in organization
+gh-prune-branches -R "myorg/*"
+
+# Only consider branches starting with "feature/"
+gh-prune-branches --report --filter "^feature/"
+
+# Exclude branches starting with "release"
+gh-prune-branches --report --filter "^(?!release)"
+
+# Only consider branches containing "hotfix"
+gh-prune-branches --report --filter "hotfix"
+
+# Only consider branches ending with a date pattern
+gh-prune-branches --report --filter "-\d{4}-\d{2}-\d{2}$"
+
+# Only consider branches matching user/* pattern
+gh-prune-branches --report --filter "^user/"
+```
+
 ## Installation
 
 ### From Source
@@ -129,6 +172,19 @@ The tools support multiple authentication methods:
 - ✅ Proper orphan detection (checks commits against actual target branches)
 - ✅ Organization-wide or single repository analysis
 
+### `gh-prune-branches`
+- ✅ Concurrent branch processing for fast organization-wide cleanup
+- ✅ GitHub CLI-style interface with `-R` flag
+- ✅ Current directory repository auto-detection
+- ✅ Wildcard organization support with `-R "owner/*"`
+- ✅ Safe default branch protection (never deletes default branch)
+- ✅ Report mode with `--report` flag for safe preview
+- ✅ Regex filtering with `--filter` flag for targeted branch selection
+- ✅ Clean tabular output with REPO, BRANCH, DEFAULT, BEHIND, STATUS columns
+- ✅ Automatic default branch detection
+- ✅ Rate limiting handling
+- ✅ Supports single repositories, organizations, and current repo
+
 ## Output Examples
 
 ### `gh-check-ahead` Output
@@ -168,12 +224,39 @@ ID   TITLE                         BRANCH      TARGET  MERGED
 Reopened 1 of 1 PRs
 ```
 
+### `gh-prune-branches --report` Output
+```bash
+$ gh-prune-branches --report -R "myorg/*"
+Showing 4 branches that can be pruned
+
+REPO              BRANCH           DEFAULT  BEHIND
+analytics-python  old-feature      main     12
+CommandSecurity   deprecated-api   main     45
+react-cmdlnk-gui  cleanup-styles   main     3
+terraform-jenkins hotfix-2023      main     -
+```
+
+### `gh-prune-branches` Output
+```bash
+$ gh-prune-branches -R myorg/myrepo
+Processed 3 branches
+
+BRANCH           DEFAULT  BEHIND  STATUS
+old-feature      main     12      success
+deprecated-api   main     45      success  
+cleanup-styles   main     3       success
+
+Deleted 3 branches
+```
+
 ## Use Cases
 
 ### Branch Management
 - Identify repositories with unmerged feature branches
 - Find branches that need to be merged or cleaned up
 - Monitor branch synchronization across organizations
+- Clean up stale branches that have been fully merged
+- Maintain repository hygiene by removing unnecessary branches
 
 ### PR Analysis
 - Detect merged PRs whose commits are missing from their target branches

@@ -303,6 +303,10 @@ def main():
         title_width = max(title_width, 5)  # minimum width for "TITLE"
         title_width = min(title_width, 50)  # cap at 50 chars
         
+        author_width = max(len(pr.get('user', {}).get('login', '')) for pr in all_orphaned_prs)
+        author_width = max(author_width, 6)  # minimum width for "AUTHOR"
+        author_width = min(author_width, 20)  # cap at 20 chars
+        
         branch_width = max(len(pr['source_branch']) for pr in all_orphaned_prs)
         branch_width = max(branch_width, 6)  # minimum width for "BRANCH"
         branch_width = min(branch_width, 25)  # cap at 25 chars
@@ -320,14 +324,16 @@ def main():
         
         # Print header
         if show_repo_column:
-            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
         else:
-            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
         
         # Print PRs
         for pr in all_orphaned_prs:
             pr_id = f"#{pr['number']}"
             title = pr['title'][:title_width] if len(pr['title']) > title_width else pr['title']
+            author = pr.get('user', {}).get('login', '')
+            author_display = author[:author_width] if len(author) > author_width else author
             branch = pr['source_branch'][:branch_width] if len(pr['source_branch']) > branch_width else pr['source_branch']
             target = pr['target_branch'][:target_width] if len(pr['target_branch']) > target_width else pr['target_branch']
             merged_date = pr['merged_at'].split('T')[0]  # Just the date part
@@ -335,16 +341,16 @@ def main():
             if show_repo_column:
                 repo_name = pr['repository'].split('/')[-1]  # Just repo name
                 repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
-                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {repo_display:<{repo_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {repo_display:<{repo_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
             else:
-                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
         
         print()  # Empty line after table
         
         # Handle --reopen option
         if args.reopen:
-            successful_reopens = []
-            failed_reopens = []
+            # Collect all reopen results first
+            reopen_results = []
             
             for pr in all_orphaned_prs:
                 repo_parts = pr['repository'].split('/')
@@ -352,26 +358,103 @@ def main():
                 
                 result = recreate_pr(owner_name, repo_name, pr, pr['target_branch'])
                 
-                if result["status"] == "success":
-                    successful_reopens.append(result)
-                    message = f"✓ Reopened PR #{result['original_pr']} as {result['new_pr_url']}"
-                    if result.get("review_requested"):
-                        if "success" in result["review_requested"]:
-                            message += f" (review requested)"
-                        elif "skipped" in result["review_requested"]:
-                            pass  # Don't show skipped review requests
-                        else:
-                            message += f" (review request failed)"
-                    print(message)
-                else:
-                    failed_reopens.append(result)
-                    print(f"✗ Failed to reopen PR #{result['original_pr']}: {result['error']}")
+                # Add original PR data to result for display
+                result['original_title'] = pr['title']
+                result['original_author'] = pr.get('user', {}).get('login', '')
+                result['original_repo'] = pr['repository']
+                result['original_merged_date'] = pr['merged_at'].split('T')[0]
+                
+                reopen_results.append(result)
             
-            # Summary
-            if successful_reopens or failed_reopens:
-                print(f"\nReopened {len(successful_reopens)} of {len(all_orphaned_prs)} PRs")
-                if failed_reopens:
-                    print(f"Failed to reopen {len(failed_reopens)} PRs")
+            # Display consolidated table with reopen results
+            if reopen_results:
+                print("\nReopen Results:")
+                print()
+                
+                # Calculate column widths for reopen table
+                id_width = max(len(f"#{result['original_pr']}") for result in reopen_results)
+                id_width = max(id_width, 2)  # minimum width for "ID"
+                
+                title_width = max(len(result['original_title']) for result in reopen_results)
+                title_width = max(title_width, 5)  # minimum width for "TITLE"
+                title_width = min(title_width, 40)  # cap at 40 chars
+                
+                author_width = max(len(result['original_author']) for result in reopen_results)
+                author_width = max(author_width, 6)  # minimum width for "AUTHOR"
+                author_width = min(author_width, 15)  # cap at 15 chars
+                
+                # Calculate NEW PR column width
+                new_pr_urls = [result.get('new_pr_url', '') for result in reopen_results]
+                new_pr_width = max(len(url) for url in new_pr_urls) if any(new_pr_urls) else 6
+                new_pr_width = max(new_pr_width, 6)  # minimum width for "NEW PR"
+                new_pr_width = min(new_pr_width, 50)  # cap at 50 chars
+                
+                # Calculate STATUS column width
+                status_messages = []
+                for result in reopen_results:
+                    if result["status"] == "success":
+                        status = "✓ Success"
+                        if result.get("review_requested"):
+                            if "success" in result["review_requested"]:
+                                status += " (review requested)"
+                            elif "failed" in result["review_requested"]:
+                                status += " (review failed)"
+                    else:
+                        status = f"✗ {result['error']}"
+                    status_messages.append(status)
+                
+                status_width = max(len(status) for status in status_messages)
+                status_width = max(status_width, 6)  # minimum width for "STATUS"
+                status_width = min(status_width, 60)  # cap at 60 chars
+                
+                # Check if we have multiple repositories
+                unique_repos = set(result['original_repo'] for result in reopen_results)
+                show_repo_column = len(unique_repos) > 1
+                
+                repo_width = 0
+                if show_repo_column:
+                    repo_names = [result['original_repo'].split('/')[-1] for result in reopen_results]
+                    repo_width = max(len(repo_name) for repo_name in repo_names)
+                    repo_width = max(repo_width, 4)  # minimum width for "REPO"
+                    repo_width = min(repo_width, 20)  # cap at 20 chars
+                
+                # Print header
+                if show_repo_column:
+                    print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'REPO':<{repo_width}}  {'NEW PR':<{new_pr_width}}  {'STATUS':<{status_width}}")
+                else:
+                    print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'NEW PR':<{new_pr_width}}  {'STATUS':<{status_width}}")
+                
+                # Print results
+                for i, result in enumerate(reopen_results):
+                    pr_id = f"#{result['original_pr']}"
+                    title = result['original_title'][:title_width] if len(result['original_title']) > title_width else result['original_title']
+                    author = result['original_author'][:author_width] if len(result['original_author']) > author_width else result['original_author']
+                    
+                    # Handle NEW PR column
+                    if result["status"] == "success":
+                        new_pr_url = result.get('new_pr_url', '')
+                        new_pr_display = new_pr_url[:new_pr_width] if len(new_pr_url) > new_pr_width else new_pr_url
+                    else:
+                        new_pr_display = '-'
+                    
+                    # Handle STATUS column
+                    status = status_messages[i]
+                    status_display = status[:status_width] if len(status) > status_width else status
+                    
+                    if show_repo_column:
+                        repo_name = result['original_repo'].split('/')[-1]
+                        repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
+                        print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author:<{author_width}}  {repo_display:<{repo_width}}  {new_pr_display:<{new_pr_width}}  {status_display}")
+                    else:
+                        print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author:<{author_width}}  {new_pr_display:<{new_pr_width}}  {status_display}")
+                
+                # Summary
+                successful_count = sum(1 for result in reopen_results if result["status"] == "success")
+                failed_count = len(reopen_results) - successful_count
+                
+                print(f"\nReopened {successful_count} of {len(reopen_results)} PRs")
+                if failed_count > 0:
+                    print(f"Failed to reopen {failed_count} PRs")
     else:
         print("\nNo orphaned pull requests found")
 

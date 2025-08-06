@@ -96,9 +96,11 @@ def main():
     base_branch = args.base  # Can be None (will use default branch)
     
     # Determine target repository/organization
+    used_wildcard = False
     if args.repo:
         # Use --repo/-R flag
         target_pattern, is_wildcard = parse_repo_pattern(args.repo)
+        used_wildcard = is_wildcard
         if is_wildcard:
             # Organization wildcard (e.g., "commandlink/*")
             org = target_pattern
@@ -111,6 +113,8 @@ def main():
         # Use positional target argument
         org, repo = parse_target(args.target)
         repos = [repo] if repo else None
+        # Check if target is an organization (no specific repo)
+        used_wildcard = repo is None
     else:
         # Use current repository
         current_repo = get_current_repository()
@@ -157,8 +161,8 @@ def main():
         # Sort by repository name
         found_repos.sort(key=lambda x: x["repository"])
         
-        # Check if we have multiple repositories for column display
-        show_repo_column = len(found_repos) > 1
+        # Check if we have multiple repositories or used a wildcard
+        show_repo_column = len(found_repos) > 1 or used_wildcard
         
         # Calculate column widths
         if show_repo_column:

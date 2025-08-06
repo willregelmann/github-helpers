@@ -10,6 +10,7 @@ import sys
 from typing import List, Dict, Optional, Tuple
 import concurrent.futures
 import os
+from collections import defaultdict
 
 from github_utils import (
     get_current_repository,
@@ -21,6 +22,106 @@ from github_utils import (
     get_pr_commits,
     is_commit_in_branch
 )
+
+
+def sort_prs(prs: List[Dict], order: str) -> List[Dict]:
+    """Sort PRs based on the specified order."""
+    if order == "merged":
+        return sorted(prs, key=lambda x: x['merged_at'], reverse=True)
+    elif order == "title":
+        return sorted(prs, key=lambda x: x['title'].lower())
+    elif order == "author":
+        return sorted(prs, key=lambda x: x.get('user', {}).get('login', '').lower())
+    elif order == "repo":
+        return sorted(prs, key=lambda x: x['repository'].lower())
+    elif order == "number":
+        return sorted(prs, key=lambda x: x['number'])
+    else:
+        return prs
+
+
+def group_prs(prs: List[Dict], group_by: str) -> Dict[str, List[Dict]]:
+    """Group PRs based on the specified grouping."""
+    if group_by == "none":
+        return {"": prs}
+    
+    grouped = defaultdict(list)
+    
+    for pr in prs:
+        if group_by == "repo":
+            key = pr['repository']
+        elif group_by == "author":
+            key = pr.get('user', {}).get('login', 'Unknown')
+        elif group_by == "target":
+            key = pr['target_branch']
+        else:
+            key = ""
+        
+        grouped[key].append(pr)
+    
+    return dict(grouped)
+
+
+def display_pr_group(prs: List[Dict], group_name: str, show_repo_column: bool):
+    """Display a group of PRs in table format."""
+    if not prs:
+        return
+    
+    # Calculate column widths
+    id_width = max(len(f"#{pr['number']}") for pr in prs)
+    id_width = max(id_width, 2)  # minimum width for "ID"
+    
+    title_width = max(len(pr['title']) for pr in prs)
+    title_width = max(title_width, 5)  # minimum width for "TITLE"
+    title_width = min(title_width, 50)  # cap at 50 chars
+    
+    author_width = max(len(pr.get('user', {}).get('login', '')) for pr in prs)
+    author_width = max(author_width, 6)  # minimum width for "AUTHOR"
+    author_width = min(author_width, 20)  # cap at 20 chars
+    
+    branch_width = max(len(pr['source_branch']) for pr in prs)
+    branch_width = max(branch_width, 6)  # minimum width for "BRANCH"
+    branch_width = min(branch_width, 25)  # cap at 25 chars
+    
+    target_width = max(len(pr['target_branch']) for pr in prs)
+    target_width = max(target_width, 6)  # minimum width for "TARGET"
+    target_width = min(target_width, 20)  # cap at 20 chars
+    
+    repo_width = 0
+    if show_repo_column:
+        repo_names = [pr['repository'].split('/')[-1] for pr in prs]  # Just repo name, not org/repo
+        repo_width = max(len(repo_name) for repo_name in repo_names)
+        repo_width = max(repo_width, 4)  # minimum width for "REPO"
+        repo_width = min(repo_width, 30)  # cap at 30 chars
+    
+    # Print group header if not empty
+    if group_name:
+        print(f"=== {group_name} ({len(prs)} PRs) ===")
+    
+    # Print table header
+    if show_repo_column:
+        print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+    else:
+        print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
+    
+    # Print PRs
+    for pr in prs:
+        pr_id = f"#{pr['number']}"
+        title = pr['title'][:title_width] if len(pr['title']) > title_width else pr['title']
+        author = pr.get('user', {}).get('login', '')
+        author_display = author[:author_width] if len(author) > author_width else author
+        branch = pr['source_branch'][:branch_width] if len(pr['source_branch']) > branch_width else pr['source_branch']
+        target = pr['target_branch'][:target_width] if len(pr['target_branch']) > target_width else pr['target_branch']
+        merged_date = pr['merged_at'].split('T')[0]  # Just the date part
+        
+        if show_repo_column:
+            repo_name = pr['repository'].split('/')[-1]  # Just repo name
+            repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
+            print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {repo_display:<{repo_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+        else:
+            print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
+    
+    print()  # Empty line after each group
 
 
 def parse_arguments():
@@ -51,10 +152,26 @@ def parse_arguments():
         action="store_true",
         help="Recreate orphaned PRs with the same source/target branches"
     )
+    parser.add_argument(
+        "--group",
+        choices=["repo", "author", "target", "none"],
+        default="none",
+        help="Group results by repository, author, target branch, or no grouping (default: none)"
+    )
+    parser.add_argument(
+        "--order",
+        choices=["merged", "title", "author", "repo", "number"],
+        default="merged",
+        help="Sort results by merge date, title, author, repository, or PR number (default: merged)"
+    )
+    parser.add_argument(
+        "-H", "--head",
+        help="Branch to check for commit existence (defaults to same as --base)"
+    )
     return parser.parse_args()
 
 
-def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict) -> Optional[Dict]:
+def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, head_branch: Optional[str] = None) -> Optional[Dict]:
     """Check commits for a single PR and return orphaned PR data if any commits are missing."""
     pr_number = pr_data["number"]
     pr_title = pr_data["title"]
@@ -65,12 +182,15 @@ def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict) -> Optiona
     except Exception:
         return None
     
-    # Check commits concurrently against the PR's actual target branch
+    # Determine which branch to check commits against
+    check_branch = head_branch if head_branch else target_branch
+    
+    # Check commits concurrently against the specified branch
     missing_commits = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         # Submit all commit checks
         future_to_commit = {
-            executor.submit(is_commit_in_branch, owner, repo, commit_sha, target_branch): commit_sha
+            executor.submit(is_commit_in_branch, owner, repo, commit_sha, check_branch): commit_sha
             for commit_sha in commits
         }
         
@@ -102,7 +222,7 @@ def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict) -> Optiona
 
 
 def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str], 
-                                  search: Optional[str]) -> List[Dict]:
+                                  search: Optional[str], head_branch: Optional[str] = None) -> List[Dict]:
     """Check a single repository for orphaned PRs."""
     try:
         merged_prs = fetch_merged_prs(owner, repo, search, branch)
@@ -118,9 +238,9 @@ def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str],
     
     # Process PRs concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # Submit all PR checks - each PR will be checked against its own target branch
+        # Submit all PR checks - each PR will be checked against the specified head branch
         future_to_pr = {
-            executor.submit(check_pr_commits_concurrent, owner, repo, pr): pr
+            executor.submit(check_pr_commits_concurrent, owner, repo, pr, head_branch): pr
             for pr in merged_prs
         }
         
@@ -239,9 +359,11 @@ def main():
     # GitHub CLI handles authentication automatically
     
     # Determine target repository/organization
+    used_wildcard = False
     if args.repo:
         # Use --repo/-R flag
         target_pattern, is_wildcard = parse_repo_pattern(args.repo)
+        used_wildcard = is_wildcard
         if is_wildcard:
             # Organization wildcard (e.g., "commandlink/*")
             org = target_pattern
@@ -254,6 +376,8 @@ def main():
         # Use positional target argument
         org, repo = parse_target(args.target)
         repos = [repo] if repo else None
+        # Check if target is an organization (no specific repo)
+        used_wildcard = repo is None
     else:
         # Use current repository
         current_repo = get_current_repository()
@@ -273,11 +397,14 @@ def main():
             print(f"Error fetching repositories: {e}", file=sys.stderr)
             sys.exit(1)
     
+    # Determine head branch for commit checking
+    head_branch = args.head if args.head else args.base
+    
     all_orphaned_prs = []
     
     for repo_name in repos:
         orphaned_prs = check_repository_orphaned_prs(
-            org, repo_name, args.base, args.search
+            org, repo_name, args.base, args.search, head_branch
         )
         
         if orphaned_prs:
@@ -288,64 +415,20 @@ def main():
         print(f"\nShowing {len(all_orphaned_prs)} orphaned pull requests")
         print()
         
-        # Sort by merge date (newest first)
-        all_orphaned_prs.sort(key=lambda x: x['merged_at'], reverse=True)
+        # Sort PRs based on specified order
+        sorted_prs = sort_prs(all_orphaned_prs, args.order)
         
-        # Check if we have multiple repositories
+        # Group PRs if requested
+        grouped_prs = group_prs(sorted_prs, args.group)
+        
+        # Check if we have multiple repositories or used a wildcard
         unique_repos = set(pr['repository'] for pr in all_orphaned_prs)
-        show_repo_column = len(unique_repos) > 1
+        show_repo_column = len(unique_repos) > 1 or used_wildcard
         
-        # Calculate column widths
-        id_width = max(len(f"#{pr['number']}") for pr in all_orphaned_prs)
-        id_width = max(id_width, 2)  # minimum width for "ID"
-        
-        title_width = max(len(pr['title']) for pr in all_orphaned_prs)
-        title_width = max(title_width, 5)  # minimum width for "TITLE"
-        title_width = min(title_width, 50)  # cap at 50 chars
-        
-        author_width = max(len(pr.get('user', {}).get('login', '')) for pr in all_orphaned_prs)
-        author_width = max(author_width, 6)  # minimum width for "AUTHOR"
-        author_width = min(author_width, 20)  # cap at 20 chars
-        
-        branch_width = max(len(pr['source_branch']) for pr in all_orphaned_prs)
-        branch_width = max(branch_width, 6)  # minimum width for "BRANCH"
-        branch_width = min(branch_width, 25)  # cap at 25 chars
-        
-        target_width = max(len(pr['target_branch']) for pr in all_orphaned_prs)
-        target_width = max(target_width, 6)  # minimum width for "TARGET"
-        target_width = min(target_width, 20)  # cap at 20 chars
-        
-        repo_width = 0
-        if show_repo_column:
-            repo_names = [pr['repository'].split('/')[-1] for pr in all_orphaned_prs]  # Just repo name, not org/repo
-            repo_width = max(len(repo_name) for repo_name in repo_names)
-            repo_width = max(repo_width, 4)  # minimum width for "REPO"
-            repo_width = min(repo_width, 30)  # cap at 30 chars
-        
-        # Print header
-        if show_repo_column:
-            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
-        else:
-            print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
-        
-        # Print PRs
-        for pr in all_orphaned_prs:
-            pr_id = f"#{pr['number']}"
-            title = pr['title'][:title_width] if len(pr['title']) > title_width else pr['title']
-            author = pr.get('user', {}).get('login', '')
-            author_display = author[:author_width] if len(author) > author_width else author
-            branch = pr['source_branch'][:branch_width] if len(pr['source_branch']) > branch_width else pr['source_branch']
-            target = pr['target_branch'][:target_width] if len(pr['target_branch']) > target_width else pr['target_branch']
-            merged_date = pr['merged_at'].split('T')[0]  # Just the date part
-            
-            if show_repo_column:
-                repo_name = pr['repository'].split('/')[-1]  # Just repo name
-                repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
-                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {repo_display:<{repo_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
-            else:
-                print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
-        
-        print()  # Empty line after table
+        # Display grouped results
+        for group_name in sorted(grouped_prs.keys()):
+            group_prs_list = grouped_prs[group_name]
+            display_pr_group(group_prs_list, group_name, show_repo_column)
         
         # Handle --reopen option
         if args.reopen:
@@ -407,9 +490,9 @@ def main():
                 status_width = max(status_width, 6)  # minimum width for "STATUS"
                 status_width = min(status_width, 60)  # cap at 60 chars
                 
-                # Check if we have multiple repositories
+                # Check if we have multiple repositories or used a wildcard
                 unique_repos = set(result['original_repo'] for result in reopen_results)
-                show_repo_column = len(unique_repos) > 1
+                show_repo_column = len(unique_repos) > 1 or used_wildcard
                 
                 repo_width = 0
                 if show_repo_column:

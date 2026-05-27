@@ -19,7 +19,6 @@ gh-check-ahead -H <head> [-B <base>] [target]
 - `-H, --head HEAD` - Source branch to check (the branch that might be ahead) - **required**
 - `-B, --base BASE` - Target branch to compare against (defaults to repository's default branch)
 - `-R, --repo REPO` - Repository to check (owner/repo format, or owner/* for all repos in org)
-- `--token TOKEN` - GitHub personal access token
 
 **Examples:**
 ```bash
@@ -51,8 +50,10 @@ gh-orphaned-prs [target] [options]
 - `-R, --repo REPO` - Repository to check (owner/repo format)
 - `-B, --base BASE` - Only check PRs merged to this branch (if omitted, checks all merged PRs)
 - `-S, --search SEARCH` - Additional search terms (GitHub search syntax)
+- `-H, --head HEAD` - Branch to check for commit existence (defaults to same as `--base`)
 - `--reopen` - Recreate orphaned PRs with the same source/target branches
-- `--token TOKEN` - GitHub personal access token
+- `--group {repo,author,target,none}` - Group results by repository, author, target branch, or none (default: `none`)
+- `--order {merged,title,author,repo,number}` - Sort results by merge date, title, author, repository, or PR number (default: `merged`)
 
 **Examples:**
 ```bash
@@ -125,23 +126,21 @@ gh-prune-branches --report --filter "^user/"
 
 ### From Source
 ```bash
-git clone https://github.com/your-username/github-helpers.git
+git clone https://github.com/willregelmann/github-helpers.git
 cd github-helpers
 pip install -e .
 ```
 
 ### Requirements
-- Python 3.6+
-- `requests` library
-- GitHub CLI (`gh`) for authentication (optional)
+- Python 3.6+ (standard library only — no third-party packages)
+- [GitHub CLI](https://cli.github.com/) (`gh`) — used for all API access and authentication
 
 ## Authentication
 
-The tools support multiple authentication methods:
+All tools shell out to the GitHub CLI (`gh`), so authentication is handled entirely by `gh`:
 
-1. **GitHub CLI** (recommended): Run `gh auth login` to authenticate
-2. **Environment variable**: Set `GITHUB_TOKEN` environment variable
-3. **Command line**: Use `--token` flag with your personal access token
+1. **GitHub CLI** (recommended): Run `gh auth login` to authenticate interactively
+2. **Environment variable**: Set `GH_TOKEN` (or `GITHUB_TOKEN`), which `gh` reads automatically
 
 **Required token scopes:**
 - `repo` - For accessing private repositories

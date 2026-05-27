@@ -218,18 +218,19 @@ def fetch_merged_prs(owner: str, repo: str, search: Optional[str], branch: Optio
         cmd.extend(["--search", search])
     
     # Request JSON output with all fields we need
-    cmd.extend(["--json", "number,title,baseRefName,headRefName,mergedAt,url,author"])
-    
+    cmd.extend(["--json", "number,title,baseRefName,headRefName,mergedAt,url,author,mergeCommit"])
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             return []
-        
+
         merged_prs_data = json.loads(result.stdout)
-        
+
         # Convert to expected format
         merged_prs = []
         for pr in merged_prs_data:
+            merge_commit = (pr.get("mergeCommit") or {}).get("oid")
             merged_prs.append({
                 "number": pr["number"],
                 "title": pr["title"],
@@ -237,28 +238,12 @@ def fetch_merged_prs(owner: str, repo: str, search: Optional[str], branch: Optio
                 "merged_at": pr["mergedAt"],
                 "base": {"ref": pr["baseRefName"]},
                 "head": {"ref": pr["headRefName"]},
-                "user": pr.get("author", {})
+                "user": pr.get("author", {}),
+                "merge_commit": merge_commit,
             })
-        
+
         return merged_prs
-        
-    except (subprocess.SubprocessError, json.JSONDecodeError):
-        return []
 
-
-def get_pr_commits(owner: str, repo: str, pr_number: int) -> List[str]:
-    """Get all commit SHAs from a PR using gh CLI."""
-    cmd = ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}", "--json", "commits"]
-    
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            return []
-        
-        data = json.loads(result.stdout)
-        commits = data.get("commits", [])
-        return [commit["oid"] for commit in commits]
-        
     except (subprocess.SubprocessError, json.JSONDecodeError):
         return []
 

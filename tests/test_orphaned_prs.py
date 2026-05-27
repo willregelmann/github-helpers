@@ -1,5 +1,7 @@
 """Tests for gh_orphaned_prs sorting and grouping logic."""
 
+from unittest import mock
+
 import gh_orphaned_prs
 
 
@@ -62,6 +64,49 @@ class TestGroupPrs:
         prs = [{"number": 9, "user": {}}]
         result = gh_orphaned_prs.group_prs(prs, "author")
         assert "Unknown" in result
+
+
+def _merged_pr(merge_commit="abc123", base="main"):
+    return {
+        "number": 7,
+        "title": "Some change",
+        "html_url": "https://github.com/o/r/pull/7",
+        "merged_at": "2024-05-01T00:00:00Z",
+        "base": {"ref": base},
+        "head": {"ref": "feature"},
+        "user": {"login": "alice"},
+        "merge_commit": merge_commit,
+    }
+
+
+class TestCheckPrOrphaned:
+    def test_merge_commit_present_is_not_orphaned(self):
+        with mock.patch.object(gh_orphaned_prs, "is_commit_in_branch", return_value=True) as in_branch:
+            result = gh_orphaned_prs.check_pr_orphaned("o", "r", _merged_pr())
+        assert result is None
+        # Detection checks the single merge commit, not each PR commit.
+        in_branch.assert_called_once_with("o", "r", "abc123", "main")
+
+    def test_merge_commit_missing_is_orphaned(self):
+        with mock.patch.object(gh_orphaned_prs, "is_commit_in_branch", return_value=False):
+            result = gh_orphaned_prs.check_pr_orphaned("o", "r", _merged_pr())
+        assert result is not None
+        assert result["number"] == 7
+        assert result["target_branch"] == "main"
+        assert result["merge_commit"] == "abc123"
+
+    def test_missing_merge_commit_is_skipped(self):
+        # A null mergeCommit (e.g. squash where data is unavailable) must not
+        # produce a false positive.
+        with mock.patch.object(gh_orphaned_prs, "is_commit_in_branch") as in_branch:
+            result = gh_orphaned_prs.check_pr_orphaned("o", "r", _merged_pr(merge_commit=None))
+        assert result is None
+        in_branch.assert_not_called()
+
+    def test_head_branch_override_is_checked(self):
+        with mock.patch.object(gh_orphaned_prs, "is_commit_in_branch", return_value=True) as in_branch:
+            gh_orphaned_prs.check_pr_orphaned("o", "r", _merged_pr(), head_branch="release")
+        in_branch.assert_called_once_with("o", "r", "abc123", "release")
 
 
 def _display_pr(number, title, login, repository, source, target, merged_at):

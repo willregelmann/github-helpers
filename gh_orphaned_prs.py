@@ -12,6 +12,7 @@ import concurrent.futures
 from collections import defaultdict
 
 from github_utils import (
+    ensure_gh_available,
     resolve_targets,
     fetch_merged_prs,
     is_commit_in_branch,
@@ -307,7 +308,7 @@ def recreate_pr(owner: str, repo: str, pr_data: Dict, target_branch: str) -> Dic
 
 def main():
     args = parse_arguments()
-    # GitHub CLI handles authentication automatically
+    ensure_gh_available()
 
     # Determine target repository/organization
     org, repos, used_wildcard = resolve_targets(args.repo, args.target)

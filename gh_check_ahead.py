@@ -8,6 +8,7 @@ from typing import Dict, Optional
 import concurrent.futures
 
 from github_utils import (
+    ensure_gh_available,
     resolve_targets,
     get_default_branch,
     check_branch_exists,
@@ -84,8 +85,8 @@ def check_repo_branches(org: str, repo: str, head_branch: str, base_branch: Opti
 
 def main():
     args = parse_arguments()
-    # GitHub CLI handles authentication automatically
-    
+    ensure_gh_available()
+
     head_branch = args.head
     base_branch = args.base  # Can be None (will use default branch)
 

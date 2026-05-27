@@ -62,6 +62,31 @@ class TestFormatTable:
         assert lines == ["N", "42"]
 
 
+class TestEnsureGhAvailable:
+    def test_passes_when_authenticated(self):
+        with mock.patch.object(
+            github_utils.subprocess, "run", return_value=mock.Mock(returncode=0),
+        ):
+            # Should not raise/exit.
+            github_utils.ensure_gh_available()
+
+    def test_exits_when_gh_missing(self, capsys):
+        with mock.patch.object(
+            github_utils.subprocess, "run", side_effect=FileNotFoundError(),
+        ):
+            with pytest.raises(SystemExit):
+                github_utils.ensure_gh_available()
+        assert "not installed" in capsys.readouterr().err
+
+    def test_exits_when_not_authenticated(self, capsys):
+        with mock.patch.object(
+            github_utils.subprocess, "run", return_value=mock.Mock(returncode=1),
+        ):
+            with pytest.raises(SystemExit):
+                github_utils.ensure_gh_available()
+        assert "not authenticated" in capsys.readouterr().err
+
+
 class TestResolveTargets:
     def test_specific_repo_flag(self):
         org, repos, wildcard = github_utils.resolve_targets("owner/repo")

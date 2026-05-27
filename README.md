@@ -93,15 +93,21 @@ gh-prune-branches [options]
 **Options:**
 - `-R, --repo REPO` - Repository to check (owner/repo format, or owner/* for all repos in org)
 - `--report` - Only report branches that would be deleted without actually deleting them
+- `-y, --yes` - Skip the confirmation prompt and delete without prompting
 - `--filter PATTERN` - Regex pattern to filter branch names (only branches matching the pattern will be considered)
+
+By default the tool lists the prunable branches and asks for confirmation before deleting. Use `--report` for a non-destructive preview, or `-y/--yes` to skip the prompt (e.g. in scripts).
 
 **Examples:**
 ```bash
 # Show branches that can be pruned in current repository
 gh-prune-branches --report
 
-# Delete prunable branches in current repository
+# Delete prunable branches in current repository (prompts for confirmation)
 gh-prune-branches
+
+# Delete without prompting (e.g. in a script)
+gh-prune-branches --yes
 
 # Report prunable branches in specific repository
 gh-prune-branches --report -R myorg/myrepo
@@ -158,12 +164,11 @@ All tools shell out to the GitHub CLI (`gh`), so authentication is handled entir
 - ✅ Wildcard organization support with `-R "owner/*"` 
 - ✅ Clean tabular output with REPO, HEAD, BASE, AHEAD, BEHIND, STATUS columns
 - ✅ Smart default branch detection when base not specified
-- ✅ Rate limiting handling
 - ✅ Supports single repositories, organizations, and current repo
 
 ### `gh-orphaned-prs`
-- ✅ Fast PR discovery using GitHub Search API
-- ✅ Concurrent commit checking for performance  
+- ✅ Fast PR discovery via the `gh` CLI
+- ✅ Concurrent per-repository checking for performance
 - ✅ GitHub CLI-style interface with `-R` and `-B` flags
 - ✅ Current directory repository auto-detection
 - ✅ Wildcard organization support with `-R "owner/*"`
@@ -180,11 +185,11 @@ All tools shell out to the GitHub CLI (`gh`), so authentication is handled entir
 - ✅ Current directory repository auto-detection
 - ✅ Wildcard organization support with `-R "owner/*"`
 - ✅ Safe default branch protection (never deletes default branch)
+- ✅ Confirmation prompt before deletion (skip with `-y/--yes`)
 - ✅ Report mode with `--report` flag for safe preview
 - ✅ Regex filtering with `--filter` flag for targeted branch selection
 - ✅ Clean tabular output with REPO, BRANCH, DEFAULT, BEHIND, STATUS columns
 - ✅ Automatic default branch detection
-- ✅ Rate limiting handling
 - ✅ Supports single repositories, organizations, and current repo
 
 ## Output Examples
@@ -241,12 +246,19 @@ terraform-jenkins hotfix-2023      main     -
 ### `gh-prune-branches` Output
 ```bash
 $ gh-prune-branches -R myorg/myrepo
-Processed 3 branches
+Showing 3 branches that can be pruned
 
-BRANCH           DEFAULT  BEHIND  STATUS
-old-feature      main     12      success
-deprecated-api   main     45      success  
-cleanup-styles   main     3       success
+BRANCH          DEFAULT  BEHIND
+cleanup-styles  main     3
+deprecated-api  main     45
+old-feature     main     12
+
+Delete these 3 branches? [y/N] y
+
+BRANCH          DEFAULT  BEHIND  STATUS
+cleanup-styles  main     3       success
+deprecated-api  main     45      success
+old-feature     main     12      success
 
 Deleted 3 branches
 ```

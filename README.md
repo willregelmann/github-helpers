@@ -1,5 +1,8 @@
 # GitHub Helpers
 
+[![CI](https://github.com/willregelmann/github-helpers/actions/workflows/ci.yml/badge.svg)](https://github.com/willregelmann/github-helpers/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A collection of GitHub CLI helper tools for repository management and analysis.
 
 ## Tools
@@ -268,6 +271,19 @@ Deleted 3 branches
 - Validate deployment readiness across repositories
 - Ensure all merged work is properly integrated
 - Automate branch hygiene maintenance
+
+## Development
+
+Run the test suite with [pytest](https://pytest.org):
+
+```bash
+pip install pytest ruff
+ruff check .   # lint
+pytest         # run tests
+```
+
+CI runs the same lint and test steps on every push and pull request across
+Python 3.9–3.12.
 
 ## Contributing
 

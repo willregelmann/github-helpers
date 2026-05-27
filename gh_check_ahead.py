@@ -5,11 +5,8 @@ CLI tool to find repositories where a branch is ahead of another branch.
 
 import argparse
 import sys
-from typing import List, Dict, Optional, Tuple
-import os
+from typing import Dict, Optional
 import concurrent.futures
-import subprocess
-import json
 
 from github_utils import (
     get_current_repository,

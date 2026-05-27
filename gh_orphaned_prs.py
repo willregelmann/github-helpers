@@ -19,6 +19,10 @@ from github_utils import (
     format_table,
 )
 
+# Cap on concurrent `gh` subprocesses. Work runs in two non-overlapping phases
+# (list PRs, then check them), each bounded by this single ceiling.
+MAX_WORKERS = 10
+
 
 def sort_prs(prs: List[Dict], order: str) -> List[Dict]:
     """Sort PRs based on the specified order."""
@@ -173,39 +177,13 @@ def check_pr_orphaned(owner: str, repo: str, pr_data: Dict, head_branch: Optiona
     }
 
 
-def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str], 
-                                  search: Optional[str], head_branch: Optional[str] = None) -> List[Dict]:
-    """Check a single repository for orphaned PRs."""
+def fetch_repo_merged_prs(owner: str, repo: str, branch: Optional[str], search: Optional[str]) -> List[Dict]:
+    """Fetch a repository's merged PRs, returning [] (with a message) on error."""
     try:
-        merged_prs = fetch_merged_prs(owner, repo, search, branch)
+        return fetch_merged_prs(owner, repo, search, branch)
     except Exception as e:
         print(f"  Error fetching PRs for {owner}/{repo}: {e}")
         return []
-    
-    if not merged_prs:
-        return []
-    
-    # Check each PR for orphaned commits
-    orphaned_prs = []
-    
-    # Process PRs concurrently
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # Submit all PR checks - each PR will be checked against the specified head branch
-        future_to_pr = {
-            executor.submit(check_pr_orphaned, owner, repo, pr, head_branch): pr
-            for pr in merged_prs
-        }
-        
-        # Collect results as they complete
-        for future in concurrent.futures.as_completed(future_to_pr):
-            try:
-                result = future.result()
-                if result:
-                    orphaned_prs.append(result)
-            except Exception:
-                continue
-    
-    return orphaned_prs
 
 
 def request_review_from_author(owner: str, repo: str, pr_url: str, author: str) -> str:
@@ -316,22 +294,36 @@ def main():
     # Determine head branch for commit checking
     head_branch = args.head if args.head else args.base
 
-    all_orphaned_prs = []
-
-    # Check repositories concurrently (org mode can span many repos).
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [
-            executor.submit(
-                check_repository_orphaned_prs, org, repo_name, args.base, args.search, head_branch
-            )
+    # Phase 1: list merged PRs across all repositories (one listing per repo).
+    pr_tasks = []  # (repo_name, pr) pairs
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_repo = {
+            executor.submit(fetch_repo_merged_prs, org, repo_name, args.base, args.search): repo_name
             for repo_name in repos
+        }
+        for future in concurrent.futures.as_completed(future_to_repo):
+            repo_name = future_to_repo[future]
+            try:
+                pr_tasks.extend((repo_name, pr) for pr in future.result())
+            except Exception:
+                continue
+
+    # Phase 2: check each PR's merge commit. A single flat pool keeps the number
+    # of concurrent `gh` subprocesses bounded regardless of repo/PR counts.
+    all_orphaned_prs = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [
+            executor.submit(check_pr_orphaned, org, repo_name, pr, head_branch)
+            for repo_name, pr in pr_tasks
         ]
         for future in concurrent.futures.as_completed(futures):
             try:
-                all_orphaned_prs.extend(future.result())
+                result = future.result()
+                if result:
+                    all_orphaned_prs.append(result)
             except Exception:
                 continue
-    
+
     # Display results
     if all_orphaned_prs:
         print(f"\nShowing {len(all_orphaned_prs)} orphaned pull requests")

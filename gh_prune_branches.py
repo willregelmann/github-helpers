@@ -4,19 +4,16 @@ CLI tool to delete branches from GitHub that have no commits ahead of the defaul
 """
 
 import argparse
-import sys
 from typing import List, Dict, Optional, Tuple
 import concurrent.futures
 import subprocess
 import re
 
 from github_utils import (
-    get_current_repository,
-    parse_target,
-    parse_repo_pattern,
-    get_organization_repos,
+    resolve_targets,
     get_default_branch,
-    compare_branches
+    compare_branches,
+    format_table,
 )
 
 
@@ -155,36 +152,8 @@ def main():
     # GitHub CLI handles authentication automatically
     
     # Determine target repository/organization
-    if args.repo:
-        # Use --repo/-R flag
-        target_pattern, is_wildcard = parse_repo_pattern(args.repo)
-        if is_wildcard:
-            # Organization wildcard (e.g., "commandlink/*")
-            org = target_pattern
-            repos = None  # Will fetch later
-        else:
-            # Specific repository (e.g., "owner/repo")
-            org, repo = parse_target(target_pattern)
-            repos = [repo] if repo else None
-    else:
-        # Use current repository
-        current_repo = get_current_repository()
-        if not current_repo:
-            print("Error: Could not detect current repository.", file=sys.stderr)
-            print("Use --repo owner/repo or run from a git repository with GitHub remote.", file=sys.stderr)
-            sys.exit(1)
-        org, repo = parse_target(current_repo)
-        repos = [repo]
-    
-    # Fetch repositories if needed
-    if repos is None:
-        # Organization mode - fetch all repos
-        try:
-            repos = get_organization_repos(org)
-        except Exception as e:
-            print(f"Error fetching repositories: {e}", file=sys.stderr)
-            sys.exit(1)
-    
+    org, repos, _ = resolve_targets(args.repo)
+
     all_prunable_branches = []
     
     # Process repositories
@@ -203,62 +172,36 @@ def main():
         
         # Sort by repository and branch name
         all_prunable_branches.sort(key=lambda x: (x["repository"], x["branch"]))
-        
-        # Check if we have multiple repositories
+
+        # Show the repo column only when spanning multiple repositories.
         unique_repos = set(branch['repository'] for branch in all_prunable_branches)
         show_repo_column = len(unique_repos) > 1
-        
-        # Calculate column widths
-        if show_repo_column:
-            repo_width = max(len(branch["repository"]) for branch in all_prunable_branches)
-            repo_width = max(repo_width, 4)  # minimum width for "REPO"
-            repo_width = min(repo_width, 30)  # cap at 30 chars
-        else:
-            repo_width = 0
-        
-        branch_width = max(len(branch["branch"]) for branch in all_prunable_branches)
-        branch_width = max(branch_width, 6)  # minimum width for "BRANCH"
-        branch_width = min(branch_width, 30)  # cap at 30 chars
-        
-        default_width = max(len(branch["default_branch"]) for branch in all_prunable_branches)
-        default_width = max(default_width, 7)  # minimum width for "DEFAULT"
-        default_width = min(default_width, 20)  # cap at 20 chars
-        
-        # Print header
+
         if args.report:
-            if show_repo_column:
-                print(f"{'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'DEFAULT':<{default_width}}  BEHIND")
-            else:
-                print(f"{'BRANCH':<{branch_width}}  {'DEFAULT':<{default_width}}  BEHIND")
+            headers = ["REPO", "BRANCH", "DEFAULT", "BEHIND"]
+            maxs = [30, 30, 20, None]
         else:
-            if show_repo_column:
-                print(f"{'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'DEFAULT':<{default_width}}  BEHIND  STATUS")
-            else:
-                print(f"{'BRANCH':<{branch_width}}  {'DEFAULT':<{default_width}}  BEHIND  STATUS")
-        
-        # Print branches
+            headers = ["REPO", "BRANCH", "DEFAULT", "BEHIND", "STATUS"]
+            maxs = [30, 30, 20, None, None]
+
+        rows = []
         for branch_info in all_prunable_branches:
-            branch = branch_info["branch"][:branch_width] if len(branch_info["branch"]) > branch_width else branch_info["branch"]
-            default = branch_info["default_branch"][:default_width] if len(branch_info["default_branch"]) > default_width else branch_info["default_branch"]
             behind = branch_info["behind_by"] if branch_info["behind_by"] > 0 else "-"
-            
-            if args.report:
-                if show_repo_column:
-                    repo = branch_info["repository"][:repo_width] if len(branch_info["repository"]) > repo_width else branch_info["repository"]
-                    print(f"{repo:<{repo_width}}  {branch:<{branch_width}}  {default:<{default_width}}  {behind}")
-                else:
-                    print(f"{branch:<{branch_width}}  {default:<{default_width}}  {behind}")
-            else:
+            row = [branch_info["repository"], branch_info["branch"], branch_info["default_branch"], behind]
+            if not args.report:
                 status = branch_info.get("deletion_status", "pending")
                 if status == "failed":
                     status = f"failed ({branch_info.get('deletion_message', 'unknown error')})"
-                
-                if show_repo_column:
-                    repo = branch_info["repository"][:repo_width] if len(branch_info["repository"]) > repo_width else branch_info["repository"]
-                    print(f"{repo:<{repo_width}}  {branch:<{branch_width}}  {default:<{default_width}}  {behind:<6}  {status}")
-                else:
-                    print(f"{branch:<{branch_width}}  {default:<{default_width}}  {behind:<6}  {status}")
-        
+                row.append(status)
+            rows.append(row)
+
+        if not show_repo_column:
+            headers = headers[1:]
+            maxs = maxs[1:]
+            rows = [row[1:] for row in rows]
+
+        print("\n".join(format_table(headers, rows, maxs=maxs)))
+
         if not args.report:
             # Summary of deletions
             successful = sum(1 for b in all_prunable_branches if b.get("deletion_status") == "success")

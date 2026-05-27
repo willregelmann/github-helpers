@@ -2,6 +2,8 @@
 
 from unittest import mock
 
+import pytest
+
 import github_utils
 
 
@@ -26,6 +28,73 @@ class TestParseRepoPattern:
 
     def test_bare_org_is_not_wildcard(self):
         assert github_utils.parse_repo_pattern("owner") == ("owner", False)
+
+
+class TestFormatTable:
+    def test_pads_to_header_width_and_leaves_last_column_unpadded(self):
+        lines = github_utils.format_table(
+            ["NAME", "AGE"],
+            [["al", "30"], ["bob", "5"]],
+        )
+        # NAME column width is max(len("NAME"), len("bob")) == 4; last column unpadded.
+        assert lines == ["NAME  AGE", "al    30", "bob   5"]
+
+    def test_min_width_comes_from_header(self):
+        lines = github_utils.format_table(["BRANCH"], [["x"]])
+        # Single (last) column is unpadded, so the row is just the value.
+        assert lines == ["BRANCH", "x"]
+
+    def test_truncates_with_ellipsis_when_over_max(self):
+        lines = github_utils.format_table(
+            ["TITLE", "END"],
+            [["a-very-long-title-value", "z"]],
+            maxs=[10, None],
+        )
+        assert lines[1].startswith("a-very-lo…")
+        assert lines[1].endswith("z")
+
+    def test_last_column_truncated_when_max_set(self):
+        lines = github_utils.format_table(["A", "STATUS"], [["1", "x" * 80]], maxs=[None, 5])
+        assert lines[1] == "1  xxxx…"
+
+    def test_non_string_cells_are_stringified(self):
+        lines = github_utils.format_table(["N"], [[42]])
+        assert lines == ["N", "42"]
+
+
+class TestResolveTargets:
+    def test_specific_repo_flag(self):
+        org, repos, wildcard = github_utils.resolve_targets("owner/repo")
+        assert (org, repos, wildcard) == ("owner", ["repo"], False)
+
+    def test_wildcard_flag_expands_org(self):
+        with mock.patch.object(
+            github_utils, "get_organization_repos", return_value=["r1", "r2"],
+        ) as get_repos:
+            org, repos, wildcard = github_utils.resolve_targets("owner/*")
+        assert (org, repos, wildcard) == ("owner", ["r1", "r2"], True)
+        get_repos.assert_called_once_with("owner")
+
+    def test_positional_org_target_expands(self):
+        with mock.patch.object(github_utils, "get_organization_repos", return_value=["r1"]):
+            org, repos, wildcard = github_utils.resolve_targets(None, "myorg")
+        assert (org, repos, wildcard) == ("myorg", ["r1"], True)
+
+    def test_positional_repo_target(self):
+        org, repos, wildcard = github_utils.resolve_targets(None, "myorg/myrepo")
+        assert (org, repos, wildcard) == ("myorg", ["myrepo"], False)
+
+    def test_falls_back_to_current_repository(self):
+        with mock.patch.object(
+            github_utils, "get_current_repository", return_value="me/here",
+        ):
+            org, repos, wildcard = github_utils.resolve_targets(None, None)
+        assert (org, repos, wildcard) == ("me", ["here"], False)
+
+    def test_exits_when_no_target_detectable(self):
+        with mock.patch.object(github_utils, "get_current_repository", return_value=None):
+            with pytest.raises(SystemExit):
+                github_utils.resolve_targets(None, None)
 
 
 def _git_remote(url, returncode=0):

@@ -5,19 +5,16 @@ CLI tool to find merged PRs that contain commits not present in the target branc
 
 import argparse
 import subprocess
-import sys
 from typing import List, Dict, Optional
 import concurrent.futures
 from collections import defaultdict
 
 from github_utils import (
-    get_current_repository,
-    parse_target,
-    parse_repo_pattern,
-    get_organization_repos,
+    resolve_targets,
     fetch_merged_prs,
     get_pr_commits,
-    is_commit_in_branch
+    is_commit_in_branch,
+    format_table,
 )
 
 
@@ -63,61 +60,31 @@ def display_pr_group(prs: List[Dict], group_name: str, show_repo_column: bool):
     """Display a group of PRs in table format."""
     if not prs:
         return
-    
-    # Calculate column widths
-    id_width = max(len(f"#{pr['number']}") for pr in prs)
-    id_width = max(id_width, 2)  # minimum width for "ID"
-    
-    title_width = max(len(pr['title']) for pr in prs)
-    title_width = max(title_width, 5)  # minimum width for "TITLE"
-    title_width = min(title_width, 50)  # cap at 50 chars
-    
-    author_width = max(len(pr.get('user', {}).get('login', '')) for pr in prs)
-    author_width = max(author_width, 6)  # minimum width for "AUTHOR"
-    author_width = min(author_width, 20)  # cap at 20 chars
-    
-    branch_width = max(len(pr['source_branch']) for pr in prs)
-    branch_width = max(branch_width, 6)  # minimum width for "BRANCH"
-    branch_width = min(branch_width, 25)  # cap at 25 chars
-    
-    target_width = max(len(pr['target_branch']) for pr in prs)
-    target_width = max(target_width, 6)  # minimum width for "TARGET"
-    target_width = min(target_width, 20)  # cap at 20 chars
-    
-    repo_width = 0
-    if show_repo_column:
-        repo_names = [pr['repository'].split('/')[-1] for pr in prs]  # Just repo name, not org/repo
-        repo_width = max(len(repo_name) for repo_name in repo_names)
-        repo_width = max(repo_width, 4)  # minimum width for "REPO"
-        repo_width = min(repo_width, 30)  # cap at 30 chars
-    
+
     # Print group header if not empty
     if group_name:
         print(f"=== {group_name} ({len(prs)} PRs) ===")
-    
-    # Print table header
-    if show_repo_column:
-        print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'REPO':<{repo_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
-    else:
-        print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'BRANCH':<{branch_width}}  {'TARGET':<{target_width}}  MERGED")
-    
-    # Print PRs
+
+    headers = ["ID", "TITLE", "AUTHOR", "REPO", "BRANCH", "TARGET", "MERGED"]
+    maxs = [None, 50, 20, 30, 25, 20, None]
+    rows = []
     for pr in prs:
-        pr_id = f"#{pr['number']}"
-        title = pr['title'][:title_width] if len(pr['title']) > title_width else pr['title']
-        author = pr.get('user', {}).get('login', '')
-        author_display = author[:author_width] if len(author) > author_width else author
-        branch = pr['source_branch'][:branch_width] if len(pr['source_branch']) > branch_width else pr['source_branch']
-        target = pr['target_branch'][:target_width] if len(pr['target_branch']) > target_width else pr['target_branch']
-        merged_date = pr['merged_at'].split('T')[0]  # Just the date part
-        
-        if show_repo_column:
-            repo_name = pr['repository'].split('/')[-1]  # Just repo name
-            repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
-            print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {repo_display:<{repo_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
-        else:
-            print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author_display:<{author_width}}  {branch:<{branch_width}}  {target:<{target_width}}  {merged_date}")
-    
+        rows.append([
+            f"#{pr['number']}",
+            pr['title'],
+            pr.get('user', {}).get('login', ''),
+            pr['repository'].split('/')[-1],  # repo name only, not org/repo
+            pr['source_branch'],
+            pr['target_branch'],
+            pr['merged_at'].split('T')[0],  # date part only
+        ])
+
+    if not show_repo_column:
+        del headers[3]
+        del maxs[3]
+        rows = [row[:3] + row[4:] for row in rows]
+
+    print("\n".join(format_table(headers, rows, maxs=maxs)))
     print()  # Empty line after each group
 
 
@@ -354,58 +321,28 @@ def recreate_pr(owner: str, repo: str, pr_data: Dict, target_branch: str) -> Dic
 def main():
     args = parse_arguments()
     # GitHub CLI handles authentication automatically
-    
+
     # Determine target repository/organization
-    used_wildcard = False
-    if args.repo:
-        # Use --repo/-R flag
-        target_pattern, is_wildcard = parse_repo_pattern(args.repo)
-        used_wildcard = is_wildcard
-        if is_wildcard:
-            # Organization wildcard (e.g., "commandlink/*")
-            org = target_pattern
-            repos = None  # Will fetch later
-        else:
-            # Specific repository (e.g., "owner/repo")
-            org, repo = parse_target(target_pattern)
-            repos = [repo] if repo else None
-    elif args.target:
-        # Use positional target argument
-        org, repo = parse_target(args.target)
-        repos = [repo] if repo else None
-        # Check if target is an organization (no specific repo)
-        used_wildcard = repo is None
-    else:
-        # Use current repository
-        current_repo = get_current_repository()
-        if not current_repo:
-            print("Error: Could not detect current repository and no target specified.", file=sys.stderr)
-            print("Use --repo owner/repo or run from a git repository with GitHub remote.", file=sys.stderr)
-            sys.exit(1)
-        org, repo = parse_target(current_repo)
-        repos = [repo]
-    
-    # Fetch repositories if needed
-    if repos is None:
-        # Organization mode - fetch all repos
-        try:
-            repos = get_organization_repos(org)
-        except Exception as e:
-            print(f"Error fetching repositories: {e}", file=sys.stderr)
-            sys.exit(1)
-    
+    org, repos, used_wildcard = resolve_targets(args.repo, args.target)
+
     # Determine head branch for commit checking
     head_branch = args.head if args.head else args.base
-    
+
     all_orphaned_prs = []
-    
-    for repo_name in repos:
-        orphaned_prs = check_repository_orphaned_prs(
-            org, repo_name, args.base, args.search, head_branch
-        )
-        
-        if orphaned_prs:
-            all_orphaned_prs.extend(orphaned_prs)
+
+    # Check repositories concurrently (org mode can span many repos).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [
+            executor.submit(
+                check_repository_orphaned_prs, org, repo_name, args.base, args.search, head_branch
+            )
+            for repo_name in repos
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                all_orphaned_prs.extend(future.result())
+            except Exception:
+                continue
     
     # Display results
     if all_orphaned_prs:
@@ -450,84 +387,42 @@ def main():
             if reopen_results:
                 print("\nReopen Results:")
                 print()
-                
-                # Calculate column widths for reopen table
-                id_width = max(len(f"#{result['original_pr']}") for result in reopen_results)
-                id_width = max(id_width, 2)  # minimum width for "ID"
-                
-                title_width = max(len(result['original_title']) for result in reopen_results)
-                title_width = max(title_width, 5)  # minimum width for "TITLE"
-                title_width = min(title_width, 40)  # cap at 40 chars
-                
-                author_width = max(len(result['original_author']) for result in reopen_results)
-                author_width = max(author_width, 6)  # minimum width for "AUTHOR"
-                author_width = min(author_width, 15)  # cap at 15 chars
-                
-                # Calculate NEW PR column width
-                new_pr_urls = [result.get('new_pr_url', '') for result in reopen_results]
-                new_pr_width = max(len(url) for url in new_pr_urls) if any(new_pr_urls) else 6
-                new_pr_width = max(new_pr_width, 6)  # minimum width for "NEW PR"
-                new_pr_width = min(new_pr_width, 50)  # cap at 50 chars
-                
-                # Calculate STATUS column width
-                status_messages = []
+
+                # Show the repo column when spanning multiple repos or a whole org.
+                unique_repos = set(result['original_repo'] for result in reopen_results)
+                show_repo_column = len(unique_repos) > 1 or used_wildcard
+
+                headers = ["ID", "TITLE", "AUTHOR", "REPO", "NEW PR", "STATUS"]
+                maxs = [None, 40, 15, 20, 50, 60]
+                rows = []
                 for result in reopen_results:
                     if result["status"] == "success":
                         status = "✓ Success"
-                        if result.get("review_requested"):
-                            if "success" in result["review_requested"]:
-                                status += " (review requested)"
-                            elif "failed" in result["review_requested"]:
-                                status += " (review failed)"
+                        review = result.get("review_requested") or ""
+                        if "success" in review:
+                            status += " (review requested)"
+                        elif "failed" in review:
+                            status += " (review failed)"
+                        new_pr = result.get('new_pr_url', '')
                     else:
                         status = f"✗ {result['error']}"
-                    status_messages.append(status)
-                
-                status_width = max(len(status) for status in status_messages)
-                status_width = max(status_width, 6)  # minimum width for "STATUS"
-                status_width = min(status_width, 60)  # cap at 60 chars
-                
-                # Check if we have multiple repositories or used a wildcard
-                unique_repos = set(result['original_repo'] for result in reopen_results)
-                show_repo_column = len(unique_repos) > 1 or used_wildcard
-                
-                repo_width = 0
-                if show_repo_column:
-                    repo_names = [result['original_repo'].split('/')[-1] for result in reopen_results]
-                    repo_width = max(len(repo_name) for repo_name in repo_names)
-                    repo_width = max(repo_width, 4)  # minimum width for "REPO"
-                    repo_width = min(repo_width, 20)  # cap at 20 chars
-                
-                # Print header
-                if show_repo_column:
-                    print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'REPO':<{repo_width}}  {'NEW PR':<{new_pr_width}}  {'STATUS':<{status_width}}")
-                else:
-                    print(f"{'ID':<{id_width}}  {'TITLE':<{title_width}}  {'AUTHOR':<{author_width}}  {'NEW PR':<{new_pr_width}}  {'STATUS':<{status_width}}")
-                
-                # Print results
-                for i, result in enumerate(reopen_results):
-                    pr_id = f"#{result['original_pr']}"
-                    title = result['original_title'][:title_width] if len(result['original_title']) > title_width else result['original_title']
-                    author = result['original_author'][:author_width] if len(result['original_author']) > author_width else result['original_author']
-                    
-                    # Handle NEW PR column
-                    if result["status"] == "success":
-                        new_pr_url = result.get('new_pr_url', '')
-                        new_pr_display = new_pr_url[:new_pr_width] if len(new_pr_url) > new_pr_width else new_pr_url
-                    else:
-                        new_pr_display = '-'
-                    
-                    # Handle STATUS column
-                    status = status_messages[i]
-                    status_display = status[:status_width] if len(status) > status_width else status
-                    
-                    if show_repo_column:
-                        repo_name = result['original_repo'].split('/')[-1]
-                        repo_display = repo_name[:repo_width] if len(repo_name) > repo_width else repo_name
-                        print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author:<{author_width}}  {repo_display:<{repo_width}}  {new_pr_display:<{new_pr_width}}  {status_display}")
-                    else:
-                        print(f"{pr_id:<{id_width}}  {title:<{title_width}}  {author:<{author_width}}  {new_pr_display:<{new_pr_width}}  {status_display}")
-                
+                        new_pr = '-'
+                    rows.append([
+                        f"#{result['original_pr']}",
+                        result['original_title'],
+                        result['original_author'],
+                        result['original_repo'].split('/')[-1],
+                        new_pr,
+                        status,
+                    ])
+
+                if not show_repo_column:
+                    del headers[3]
+                    del maxs[3]
+                    rows = [row[:3] + row[4:] for row in rows]
+
+                print("\n".join(format_table(headers, rows, maxs=maxs)))
+
                 # Summary
                 successful_count = sum(1 for result in reopen_results if result["status"] == "success")
                 failed_count = len(reopen_results) - successful_count

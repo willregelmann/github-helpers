@@ -135,7 +135,7 @@ pip install -e .
 ```
 
 ### Requirements
-- Python 3.6+ (standard library only — no third-party packages)
+- Python 3.9+ (standard library only — no third-party packages)
 - [GitHub CLI](https://cli.github.com/) (`gh`) — used for all API access and authentication
 
 ## Authentication

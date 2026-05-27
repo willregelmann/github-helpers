@@ -7,7 +7,8 @@ Provides common GitHub CLI-based operations.
 import subprocess
 import json
 import os
-from typing import List, Dict, Optional, Tuple
+import sys
+from typing import Any, List, Dict, Optional, Sequence, Tuple
 
 
 def get_current_repository() -> Optional[str]:
@@ -45,6 +46,93 @@ def parse_target(target: str) -> Tuple[str, Optional[str]]:
         parts = target.split("/", 1)
         return parts[0], parts[1]
     return target, None
+
+
+def resolve_targets(repo: Optional[str], target: Optional[str] = None) -> Tuple[str, List[str], bool]:
+    """Resolve a target specification into (org, repos, used_wildcard).
+
+    Precedence: the ``--repo`` value, then a positional ``target``, then the
+    current repository. ``repos`` is the concrete list of repository names
+    within ``org`` (org-wide modes are expanded via :func:`get_organization_repos`).
+    ``used_wildcard`` is True when operating across a whole organization.
+
+    Exits the process with a helpful message when no target can be determined.
+    """
+    used_wildcard = False
+    repos: Optional[List[str]] = None
+
+    if repo:
+        target_pattern, is_wildcard = parse_repo_pattern(repo)
+        used_wildcard = is_wildcard
+        if is_wildcard:
+            org = target_pattern
+        else:
+            org, repo_name = parse_target(target_pattern)
+            repos = [repo_name] if repo_name else None
+    elif target:
+        org, repo_name = parse_target(target)
+        repos = [repo_name] if repo_name else None
+        used_wildcard = repo_name is None
+    else:
+        current_repo = get_current_repository()
+        if not current_repo:
+            print("Error: Could not detect current repository and no target specified.", file=sys.stderr)
+            print("Use --repo owner/repo or run from a git repository with GitHub remote.", file=sys.stderr)
+            sys.exit(1)
+        org, repo_name = parse_target(current_repo)
+        repos = [repo_name]
+
+    if repos is None:
+        repos = get_organization_repos(org)
+
+    return org, repos, used_wildcard
+
+
+def _truncate(text: str, width: int) -> str:
+    """Truncate ``text`` to ``width`` columns, marking elision with an ellipsis."""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "…"
+
+
+def format_table(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    mins: Optional[Sequence[int]] = None,
+    maxs: Optional[Sequence[Optional[int]]] = None,
+    gap: str = "  ",
+) -> List[str]:
+    """Render aligned columns and return the lines (header row first).
+
+    Each column's width is the longest of its header and cell values, clamped
+    to ``mins[i]`` and ``maxs[i]`` when provided; cells exceeding the width are
+    truncated with an ellipsis. The final column is left unpadded so there is no
+    trailing whitespace.
+    """
+    n = len(headers)
+    mins = list(mins) if mins is not None else [0] * n
+    maxs = list(maxs) if maxs is not None else [None] * n
+    str_rows = [[str(cell) for cell in row] for row in rows]
+
+    widths = []
+    for i in range(n):
+        content = max([len(headers[i])] + [len(row[i]) for row in str_rows])
+        width = max(content, mins[i])
+        if maxs[i] is not None:
+            width = min(width, maxs[i])
+        widths.append(width)
+
+    def render(cells: Sequence[str]) -> str:
+        parts = []
+        for i, cell in enumerate(cells):
+            cell = _truncate(cell, widths[i])
+            # Last column is unpadded to avoid trailing whitespace.
+            parts.append(cell if i == n - 1 else f"{cell:<{widths[i]}}")
+        return gap.join(parts)
+
+    return [render([str(h) for h in headers])] + [render(row) for row in str_rows]
 
 
 def parse_repo_pattern(repo_pattern: str) -> Tuple[str, bool]:

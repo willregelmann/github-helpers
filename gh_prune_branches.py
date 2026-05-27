@@ -10,6 +10,7 @@ import subprocess
 import re
 
 from github_utils import (
+    ensure_gh_available,
     resolve_targets,
     get_default_branch,
     compare_branches,
@@ -31,6 +32,11 @@ def parse_arguments():
         "--report",
         action="store_true",
         help="Only report branches that would be deleted without actually deleting them"
+    )
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip the confirmation prompt and delete without prompting"
     )
     parser.add_argument(
         "--filter",
@@ -94,8 +100,8 @@ def check_branch_prunable(org: str, repo: str, branch: str, default_branch: str)
     return None
 
 
-def check_repository_branches(org: str, repo: str, report_only: bool, filter_pattern: Optional[str] = None) -> List[Dict]:
-    """Check all branches in a repository and optionally delete prunable ones."""
+def check_repository_branches(org: str, repo: str, filter_pattern: Optional[str] = None) -> List[Dict]:
+    """Return the branches in a repository that can be pruned."""
     # Get default branch
     default_branch = get_default_branch(org, repo)
     if not default_branch:
@@ -136,81 +142,90 @@ def check_repository_branches(org: str, repo: str, report_only: bool, filter_pat
                     prunable_branches.append(result)
             except Exception:
                 continue
-    
-    # If not report-only, delete the prunable branches
-    if not report_only and prunable_branches:
-        for branch_info in prunable_branches:
-            success, message = delete_branch(org, repo, branch_info["branch"])
-            branch_info["deletion_status"] = "success" if success else "failed"
-            branch_info["deletion_message"] = message
-    
+
     return prunable_branches
+
+
+def print_branch_table(branches: List[Dict], show_repo_column: bool, include_status: bool):
+    """Print a table of prunable branches, optionally including a deletion STATUS column."""
+    headers = ["REPO", "BRANCH", "DEFAULT", "BEHIND"]
+    maxs = [30, 30, 20, None]
+    if include_status:
+        headers.append("STATUS")
+        maxs.append(None)
+
+    rows = []
+    for branch_info in branches:
+        behind = branch_info["behind_by"] if branch_info["behind_by"] > 0 else "-"
+        row = [branch_info["repository"], branch_info["branch"], branch_info["default_branch"], behind]
+        if include_status:
+            status = branch_info.get("deletion_status", "pending")
+            if status == "failed":
+                status = f"failed ({branch_info.get('deletion_message', 'unknown error')})"
+            row.append(status)
+        rows.append(row)
+
+    if not show_repo_column:
+        headers = headers[1:]
+        maxs = maxs[1:]
+        rows = [row[1:] for row in rows]
+
+    print("\n".join(format_table(headers, rows, maxs=maxs)))
 
 
 def main():
     args = parse_arguments()
-    # GitHub CLI handles authentication automatically
-    
+    ensure_gh_available()
+
     # Determine target repository/organization
     org, repos, _ = resolve_targets(args.repo)
 
     all_prunable_branches = []
-    
-    # Process repositories
     for repo_name in repos:
-        prunable_branches = check_repository_branches(org, repo_name, args.report, args.filter)
-        if prunable_branches:
-            all_prunable_branches.extend(prunable_branches)
-    
-    # Display results
-    if all_prunable_branches:
-        if args.report:
-            print(f"\nShowing {len(all_prunable_branches)} branches that can be pruned")
-        else:
-            print(f"\nProcessed {len(all_prunable_branches)} branches")
-        print()
-        
-        # Sort by repository and branch name
-        all_prunable_branches.sort(key=lambda x: (x["repository"], x["branch"]))
+        all_prunable_branches.extend(check_repository_branches(org, repo_name, args.filter))
 
-        # Show the repo column only when spanning multiple repositories.
-        unique_repos = set(branch['repository'] for branch in all_prunable_branches)
-        show_repo_column = len(unique_repos) > 1
-
-        if args.report:
-            headers = ["REPO", "BRANCH", "DEFAULT", "BEHIND"]
-            maxs = [30, 30, 20, None]
-        else:
-            headers = ["REPO", "BRANCH", "DEFAULT", "BEHIND", "STATUS"]
-            maxs = [30, 30, 20, None, None]
-
-        rows = []
-        for branch_info in all_prunable_branches:
-            behind = branch_info["behind_by"] if branch_info["behind_by"] > 0 else "-"
-            row = [branch_info["repository"], branch_info["branch"], branch_info["default_branch"], behind]
-            if not args.report:
-                status = branch_info.get("deletion_status", "pending")
-                if status == "failed":
-                    status = f"failed ({branch_info.get('deletion_message', 'unknown error')})"
-                row.append(status)
-            rows.append(row)
-
-        if not show_repo_column:
-            headers = headers[1:]
-            maxs = maxs[1:]
-            rows = [row[1:] for row in rows]
-
-        print("\n".join(format_table(headers, rows, maxs=maxs)))
-
-        if not args.report:
-            # Summary of deletions
-            successful = sum(1 for b in all_prunable_branches if b.get("deletion_status") == "success")
-            failed = sum(1 for b in all_prunable_branches if b.get("deletion_status") == "failed")
-            print(f"\nDeleted {successful} branches")
-            if failed:
-                print(f"Failed to delete {failed} branches")
-    else:
+    if not all_prunable_branches:
         print("\nNo prunable branches found")
+        return
+
+    # Sort by repository and branch name
+    all_prunable_branches.sort(key=lambda x: (x["repository"], x["branch"]))
+
+    # Show the repo column only when spanning multiple repositories.
+    unique_repos = set(branch['repository'] for branch in all_prunable_branches)
+    show_repo_column = len(unique_repos) > 1
+
+    # Always show what can be pruned before doing anything destructive.
+    print(f"\nShowing {len(all_prunable_branches)} branches that can be pruned")
+    print()
+    print_branch_table(all_prunable_branches, show_repo_column, include_status=False)
+
+    if args.report:
+        return
+
+    # Confirm before deleting unless explicitly skipped.
+    if not args.yes:
+        answer = input(f"\nDelete these {len(all_prunable_branches)} branches? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Aborted. No branches deleted.")
+            return
+
+    # Delete and report results.
+    for branch_info in all_prunable_branches:
+        success, message = delete_branch(
+            *branch_info["repository"].split("/", 1), branch_info["branch"]
+        )
+        branch_info["deletion_status"] = "success" if success else "failed"
+        branch_info["deletion_message"] = message
+
+    print()
+    print_branch_table(all_prunable_branches, show_repo_column, include_status=True)
+
+    successful = sum(1 for b in all_prunable_branches if b.get("deletion_status") == "success")
+    failed = sum(1 for b in all_prunable_branches if b.get("deletion_status") == "failed")
+    print(f"\nDeleted {successful} branches")
+    if failed:
+        print(f"Failed to delete {failed} branches")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,28 @@ import sys
 from typing import Any, List, Dict, Optional, Sequence, Tuple
 
 
+def ensure_gh_available() -> None:
+    """Exit with a clear message if the GitHub CLI is missing or unauthenticated.
+
+    The tools delegate all API access to ``gh``; without this check a missing
+    binary surfaces as an opaque traceback and an unauthenticated CLI silently
+    yields empty results that look like "nothing found".
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "status"], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        print("Error: GitHub CLI (gh) is not installed or not on PATH.", file=sys.stderr)
+        print("Install it from https://cli.github.com/ and run `gh auth login`.", file=sys.stderr)
+        sys.exit(1)
+
+    if result.returncode != 0:
+        print("Error: GitHub CLI is not authenticated.", file=sys.stderr)
+        print("Run `gh auth login` to authenticate.", file=sys.stderr)
+        sys.exit(1)
+
+
 def get_current_repository() -> Optional[str]:
     """Get the current repository from git remote origin."""
     try:

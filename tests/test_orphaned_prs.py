@@ -109,6 +109,17 @@ class TestCheckPrOrphaned:
         in_branch.assert_called_once_with("o", "r", "abc123", "release")
 
 
+class TestFetchRepoMergedPrs:
+    def test_passes_through_results(self):
+        with mock.patch.object(gh_orphaned_prs, "fetch_merged_prs", return_value=[{"number": 1}]):
+            assert gh_orphaned_prs.fetch_repo_merged_prs("o", "r", None, None) == [{"number": 1}]
+
+    def test_returns_empty_on_error(self, capsys):
+        with mock.patch.object(gh_orphaned_prs, "fetch_merged_prs", side_effect=RuntimeError("boom")):
+            assert gh_orphaned_prs.fetch_repo_merged_prs("o", "r", None, None) == []
+        assert "Error fetching PRs for o/r" in capsys.readouterr().out
+
+
 def _display_pr(number, title, login, repository, source, target, merged_at):
     return {
         "number": number,

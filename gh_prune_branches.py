@@ -6,10 +6,8 @@ CLI tool to delete branches from GitHub that have no commits ahead of the defaul
 import argparse
 import sys
 from typing import List, Dict, Optional, Tuple
-import os
 import concurrent.futures
 import subprocess
-import json
 import re
 
 from github_utils import (
@@ -18,7 +16,6 @@ from github_utils import (
     parse_repo_pattern,
     get_organization_repos,
     get_default_branch,
-    check_branch_exists,
     compare_branches
 )
 

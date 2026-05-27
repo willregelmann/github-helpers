@@ -5,11 +5,9 @@ CLI tool to find merged PRs that contain commits not present in the target branc
 
 import argparse
 import subprocess
-import json
 import sys
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import concurrent.futures
-import os
 from collections import defaultdict
 
 from github_utils import (
@@ -17,7 +15,6 @@ from github_utils import (
     parse_target,
     parse_repo_pattern,
     get_organization_repos,
-    get_default_branch,
     fetch_merged_prs,
     get_pr_commits,
     is_commit_in_branch
@@ -277,7 +274,7 @@ def request_review_from_author(owner: str, repo: str, pr_url: str, author: str) 
         else:
             error_msg = result.stderr.strip() or "Unknown error"
             if "Review cannot be requested from pull request author" in error_msg:
-                return f"skipped - cannot request review from PR author"
+                return "skipped - cannot request review from PR author"
             return f"failed - {error_msg}"
             
     except Exception as e:

@@ -39,7 +39,7 @@ gh-check-ahead -H main -B release
 ```
 
 ### `gh-orphaned-prs`
-Find merged PRs whose commits are missing from their target branch (indicates history rewrites, resets, or lost commits).
+Find merged PRs whose merge commit is no longer present on the target branch (indicates history rewrites, resets, or lost commits). Because detection checks each PR's recorded merge commit, it works correctly across merge, squash, and rebase merges.
 
 **Usage:**
 ```bash
@@ -171,7 +171,7 @@ All tools shell out to the GitHub CLI (`gh`), so authentication is handled entir
 - ✅ Clean tabular output matching `gh pr list` format
 - ✅ Automatic PR recreation with `--reopen` flag
 - ✅ Review requests to original authors on reopened PRs
-- ✅ Proper orphan detection (checks commits against actual target branches)
+- ✅ Merge-commit-based orphan detection (correct for merge, squash, and rebase merges)
 - ✅ Organization-wide or single repository analysis
 
 ### `gh-prune-branches`

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-CLI tool to find merged PRs that contain commits not present in the target branch.
+CLI tool to find merged PRs whose merge commit is no longer present on the
+target branch, which indicates the branch history was rewritten, reset, or
+otherwise lost the merge. Works across merge, squash, and rebase merges.
 """
 
 import argparse
@@ -12,7 +14,6 @@ from collections import defaultdict
 from github_utils import (
     resolve_targets,
     fetch_merged_prs,
-    get_pr_commits,
     is_commit_in_branch,
     format_table,
 )
@@ -135,54 +136,40 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def check_pr_commits_concurrent(owner: str, repo: str, pr_data: Dict, head_branch: Optional[str] = None) -> Optional[Dict]:
-    """Check commits for a single PR and return orphaned PR data if any commits are missing."""
-    pr_number = pr_data["number"]
-    pr_title = pr_data["title"]
+def check_pr_orphaned(owner: str, repo: str, pr_data: Dict, head_branch: Optional[str] = None) -> Optional[Dict]:
+    """Return orphaned-PR data if the PR's merge commit is missing from its target branch.
+
+    A merged PR records a ``mergeCommit`` regardless of merge method (merge,
+    squash, or rebase). Checking that single commit's reachability avoids the
+    false positives that arise from comparing the PR's original commit SHAs —
+    which never land on the target branch under squash/rebase merges — while
+    still detecting genuine history rewrites, resets, and lost commits.
+    """
     target_branch = pr_data.get("base", {}).get("ref", "unknown")
-    
-    try:
-        commits = get_pr_commits(owner, repo, pr_number)
-    except Exception:
+    merge_commit = pr_data.get("merge_commit")
+
+    # Without a merge commit we can't make a reliable determination, so skip
+    # rather than risk a false positive.
+    if not merge_commit:
         return None
-    
-    # Determine which branch to check commits against
+
+    # Check against an explicit head branch if given, else the target branch.
     check_branch = head_branch if head_branch else target_branch
-    
-    # Check commits concurrently against the specified branch
-    missing_commits = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Submit all commit checks
-        future_to_commit = {
-            executor.submit(is_commit_in_branch, owner, repo, commit_sha, check_branch): commit_sha
-            for commit_sha in commits
-        }
-        
-        # Collect results
-        for future in concurrent.futures.as_completed(future_to_commit):
-            commit_sha = future_to_commit[future]
-            try:
-                in_branch = future.result()
-                if not in_branch:
-                    missing_commits.append(commit_sha)
-            except Exception:
-                # If commit check fails, assume it's missing
-                missing_commits.append(commit_sha)
-    
-    if missing_commits:
-        return {
-            "number": pr_number,
-            "title": pr_title,
-            "url": pr_data["html_url"],
-            "merged_at": pr_data["merged_at"],
-            "source_branch": pr_data.get("head", {}).get("ref", "unknown"),
-            "target_branch": target_branch,
-            "repository": f"{owner}/{repo}",
-            "user": pr_data.get("user", {}),
-            "missing_commits": missing_commits
-        }
-    
-    return None
+
+    if is_commit_in_branch(owner, repo, merge_commit, check_branch):
+        return None
+
+    return {
+        "number": pr_data["number"],
+        "title": pr_data["title"],
+        "url": pr_data["html_url"],
+        "merged_at": pr_data["merged_at"],
+        "source_branch": pr_data.get("head", {}).get("ref", "unknown"),
+        "target_branch": target_branch,
+        "repository": f"{owner}/{repo}",
+        "user": pr_data.get("user", {}),
+        "merge_commit": merge_commit,
+    }
 
 
 def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str], 
@@ -204,7 +191,7 @@ def check_repository_orphaned_prs(owner: str, repo: str, branch: Optional[str],
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         # Submit all PR checks - each PR will be checked against the specified head branch
         future_to_pr = {
-            executor.submit(check_pr_commits_concurrent, owner, repo, pr, head_branch): pr
+            executor.submit(check_pr_orphaned, owner, repo, pr, head_branch): pr
             for pr in merged_prs
         }
         

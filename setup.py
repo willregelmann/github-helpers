@@ -17,5 +17,5 @@ setup(
             'gh-prune-branches=gh_prune_branches:main',
         ],
     },
-    python_requires=">=3.6",
+    python_requires=">=3.9",
 )

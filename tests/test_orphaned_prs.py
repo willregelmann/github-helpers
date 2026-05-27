@@ -62,3 +62,35 @@ class TestGroupPrs:
         prs = [{"number": 9, "user": {}}]
         result = gh_orphaned_prs.group_prs(prs, "author")
         assert "Unknown" in result
+
+
+def _display_pr(number, title, login, repository, source, target, merged_at):
+    return {
+        "number": number,
+        "title": title,
+        "user": {"login": login},
+        "repository": repository,
+        "source_branch": source,
+        "target_branch": target,
+        "merged_at": merged_at,
+    }
+
+
+class TestDisplayPrGroup:
+    def test_repo_column_shown_when_requested(self, capsys):
+        prs = [_display_pr(5, "Fix", "alice", "org/repo-a", "feat", "main", "2024-01-02T00:00:00Z")]
+        gh_orphaned_prs.display_pr_group(prs, "", show_repo_column=True)
+        header = capsys.readouterr().out.splitlines()[0]
+        assert "REPO" in header
+        # Repository is shown as bare name, not org/repo.
+        assert "org/repo-a" not in header
+
+    def test_repo_column_hidden_when_not_requested(self, capsys):
+        prs = [_display_pr(5, "Fix", "alice", "org/repo-a", "feat", "main", "2024-01-02T00:00:00Z")]
+        gh_orphaned_prs.display_pr_group(prs, "", show_repo_column=False)
+        out = capsys.readouterr().out
+        header = out.splitlines()[0]
+        assert "REPO" not in header
+        # Merged date is rendered as date only.
+        assert "2024-01-02" in out
+        assert "T00:00:00Z" not in out
